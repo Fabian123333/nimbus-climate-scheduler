@@ -31,6 +31,38 @@
   const WS_GET_ZONES = "nimbus_climate_scheduler/get_zones";
   const PANEL_PATH = "/nimbus-climate-scheduler";
   const PREPAINT_STYLE_ID = "nimbus-climate-scheduler-card-prepaint";
+  const PREPAINT_BACKGROUND = "linear-gradient(180deg, #1b1d22 0%, #181a1e 100%)";
+  const PREPAINT_BORDER = "1px solid rgba(255,255,255,.10)";
+  const PRE_HASS_SHELL = `
+    <style>
+      :host{
+        display:block;
+        min-height:0 !important;
+        background:${PREPAINT_BACKGROUND} !important;
+        border-radius:20px !important;
+        overflow-anchor:none;
+      }
+      ha-card{
+        display:block;
+        min-height:147px;
+        overflow-anchor:none;
+        --ha-card-background:${PREPAINT_BACKGROUND};
+        --card-background-color:#1b1d22;
+        background:${PREPAINT_BACKGROUND} !important;
+        background-color:#1b1d22 !important;
+        color:#ecebe7;
+        border:${PREPAINT_BORDER};
+        border-radius:20px;
+        box-shadow:none;
+      }
+      .wrap{
+        min-height:111px;
+        padding:18px 20px 16px;
+        border-radius:19px;
+        background:${PREPAINT_BACKGROUND};
+      }
+    </style>
+    <ha-card><div class="wrap"></div></ha-card>`;
 
   const scheduleMinuteToClockMinute = (m) => (DAY_START_MINUTES + m) % DAY_LENGTH_MINUTES;
   const clockMinuteToScheduleMinute = (m) => (m - DAY_START_MINUTES + DAY_LENGTH_MINUTES) % DAY_LENGTH_MINUTES;
@@ -60,7 +92,7 @@
         display: block;
         min-height: 147px;
         border-radius: 20px;
-        background: linear-gradient(180deg, #1b1d22 0%, #181a1e 100%);
+        background: ${PREPAINT_BACKGROUND};
       }
     `;
     (document.head || document.documentElement)?.appendChild(style);
@@ -146,6 +178,17 @@
   const getT = (hass) => TRANSLATIONS[(hass?.language || "en").split("-")[0]] || TRANSLATIONS.en;
 
   class NimbusClimateSchedulerCard extends HTMLElement {
+    constructor() {
+      super();
+      this.attachShadow({ mode: "open" });
+      this._paintPreHassShell();
+    }
+
+    _paintPreHassShell() {
+      if (!this.shadowRoot) this.attachShadow({ mode: "open" });
+      this.shadowRoot.innerHTML = PRE_HASS_SHELL;
+    }
+
     setConfig(config) {
       if (!config) throw new Error("nimbus-climate-scheduler-card: config is required");
       // Accept a single `entity` or a list of `entities` (each a string or {entity, name}).
@@ -159,7 +202,6 @@
       this._config = { ...config };
       this._entities = entities;
       if (this._activeIndex == null || this._activeIndex >= entities.length) this._activeIndex = 0;
-      if (!this.shadowRoot) this.attachShadow({ mode: "open" });
       this._render(); // paint the themed shell now, even before hass, to avoid a FOUC
     }
 
@@ -393,13 +435,18 @@
           .ncs-tab.is-active{ background:var(--nb-surface-2); color:var(--nb-ink);
             box-shadow:0 1px 0 rgba(255,255,255,.04) inset, 0 1px 2px rgba(0,0,0,.25); }
           ha-card{ display:block; overflow-anchor:none;
+            --ha-card-background: linear-gradient(180deg, var(--nb-surface) 0%, #181a1e 100%);
+            --card-background-color: var(--nb-surface);
             background: linear-gradient(180deg, var(--nb-surface) 0%, #181a1e 100%);
+            background-color: var(--nb-surface);
             color: var(--nb-ink);
             border: 1px solid var(--nb-line-2);
             border-radius: 20px;
             box-shadow: none;
           }
-          .wrap{ padding:18px 20px 16px; container-type:inline-size; font-family: var(--ha-card-header-font-family, var(--mdc-typography-font-family, system-ui, -apple-system, "Segoe UI", sans-serif)); }
+          .wrap{ padding:18px 20px 16px; container-type:inline-size; border-radius:19px;
+            background: linear-gradient(180deg, var(--nb-surface) 0%, #181a1e 100%);
+            font-family: var(--ha-card-header-font-family, var(--mdc-typography-font-family, system-ui, -apple-system, "Segoe UI", sans-serif)); }
           .head{ display:flex; justify-content:space-between; align-items:center; gap:12px; }
           .id{ display:flex; align-items:center; gap:12px; min-width:0; }
           .avatar{ width:40px; height:40px; border-radius:13px; flex:none; display:grid; place-items:center;
@@ -462,7 +509,7 @@
       // Paint the themed shell immediately, before hass arrives, so the card
       // never flashes the default (transparent) ha-card on first load/refresh.
       if (!this._hass) {
-        this.shadowRoot.innerHTML = STYLE + `<ha-card><div class="wrap" style="min-height:111px"></div></ha-card>`;
+        this._paintPreHassShell();
         return;
       }
 

@@ -1,5 +1,17 @@
 # Nimbus Climate Scheduler — Change Log
 
+## 2026-07-03 · Reference-card prepaint hardening (v0.2.13)
+
+- Hardened the reference card's initial painted shell so dark/glass Home
+  Assistant themes no longer show a transparent or blue-tinted surface before
+  the card finishes rendering.
+- Added an immediate constructor-level Nimbus surface before `hass`, config
+  data or scheduler zones are available.
+- Applied the same solid scheduler background to the host, `ha-card` and inner
+  card wrapper to avoid theme-level transparent `ha-card` fallbacks.
+- Bumped the registered Lovelace card resource URL so browsers load the updated
+  frontend module instead of a cached `v0.2.12` copy.
+
 ## 2026-06-25 · Mobile reference-card polish (v0.2.12)
 
 - Added haptic feedback when opening the scheduler from the narrow reference
