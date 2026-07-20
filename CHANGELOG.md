@@ -1,5 +1,15 @@
 # Nimbus Climate Scheduler — Change Log
 
+## 2026-07-20 · Local-time schedule matching (v0.2.14)
+
+- Fixed the periodic scheduler tick applying schedule slots in UTC instead of
+  the Home Assistant local time zone. `async_track_time_interval` passes a UTC
+  timestamp, which was used as-is, so setpoints were applied hours off (e.g.
+  3 hours behind in Europe/Athens) and kept overriding manual corrections
+  every scan interval. The tick now converts to local wall-clock time before
+  matching, in line with the panel's "apply now" path.
+- Added regression coverage for local-time slot matching in the tick.
+
 ## 2026-07-03 · Reference-card prepaint hardening (v0.2.13)
 
 - Hardened the reference card's initial painted shell so dark/glass Home

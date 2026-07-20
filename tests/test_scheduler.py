@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from homeassistant.util import dt as dt_util
 
 from custom_components.nimbus_climate_scheduler.scheduler import (
     DAYS,
@@ -160,6 +161,24 @@ async def test_one_failed_zone_does_not_block_the_rest() -> None:
     assert result["failed"] == ["climate.bad"]
     assert result["applied"] == ["climate.good"]
     assert applied == ["climate.good"]
+
+
+@pytest.mark.asyncio
+async def test_tick_matches_schedule_in_local_time() -> None:
+    """async_track_time_interval passes UTC; slots must match local wall-clock."""
+    scheduler = NimbusClimateScheduler(make_hass(), FakeStore(), [])
+    seen: list[datetime] = []
+    scheduler.scheduled_entity_ids = lambda: ["climate.zone"]
+    scheduler.build_plan = lambda entity_id, now: seen.append(now)
+
+    previous = dt_util.DEFAULT_TIME_ZONE
+    dt_util.set_default_time_zone(dt_util.get_time_zone("Europe/Athens"))
+    try:
+        await scheduler.async_tick(datetime(2026, 7, 20, 16, 30, tzinfo=timezone.utc))
+    finally:
+        dt_util.set_default_time_zone(previous)
+
+    assert seen and seen[0].hour == 19
 
 
 @pytest.mark.asyncio

@@ -87,7 +87,9 @@ class NimbusClimateScheduler:
         applied: list[str] = []
         failed: list[str] = []
         async with self._lock:
-            now = now or dt_util.now()
+            # async_track_time_interval passes `now` in UTC; schedules are
+            # defined in local wall-clock time, so convert before matching.
+            now = dt_util.as_local(now) if now is not None else dt_util.now()
             plans = []
             for entity_id in self.scheduled_entity_ids():
                 try:
