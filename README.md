@@ -6,11 +6,7 @@ A weekly heating & cooling scheduler for Home Assistant — a full sidebar panel
 where you draw each zone's plan on a visual timeline, and a small backend loop
 keeps your thermostats on schedule. No automations to write.
 
-![Nimbus Climate Scheduler panel](docs/panel.png)
-
-| Heating zone | Cooling zone | First‑run setup |
-| --- | --- | --- |
-| ![Heating](docs/zone-heating.png) | ![Cooling](docs/zone-cooling.png) | ![Setup wizard](docs/setup-wizard.png) |
+![Nimbus Climate Scheduler](docs/nimbus-scheduler.gif)
 
 ## Why I made this
 
@@ -44,12 +40,6 @@ the current time throughout the day.
 
 Use it with a single zone for a compact overview, or add multiple zones to get
 convenient tabs for quick switching between rooms.
-
-![Nimbus Climate Scheduler card — heating](docs/card-heating.png)
-
-| Cooling | Schedule off |
-| --- | --- |
-| ![Cooling](docs/card-cooling.png) | ![Off](docs/card-off-single.png) |
 
 The card loads automatically once the integration is set up — there's no
 Lovelace resource to add. Drop it on a dashboard with a single zone:
