@@ -1,5 +1,13 @@
 # Nimbus Climate Scheduler — Change Log
 
+## 2026-07-22 · Quiet panel re-registration (v0.2.15)
+
+- Suppressed the spurious `Removing unknown panel nimbus-climate-scheduler`
+  warning logged on a cold Home Assistant boot. The defensive
+  `async_remove_panel()` that guards against `Overwriting panel` on reload now
+  passes `warn_if_unknown=False`, so the pre-register cleanup stays without the
+  noise. No functional or frontend change; the unload-path removal is unchanged.
+
 ## 2026-07-20 · Local-time schedule matching (v0.2.14)
 
 - Fixed the periodic scheduler tick applying schedule slots in UTC instead of
