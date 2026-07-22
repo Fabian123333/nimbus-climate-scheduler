@@ -167,7 +167,9 @@ async def _async_setup_scheduler(
 
     # A previous entry-setup may have left the panel registered (e.g. after a
     # reload); drop it first so re-registration can't raise "Overwriting panel".
-    frontend.async_remove_panel(hass, PANEL_URL)
+    # On a cold boot the panel isn't registered yet, so silence the spurious
+    # "Removing unknown panel" warning that HA would otherwise log.
+    frontend.async_remove_panel(hass, PANEL_URL, warn_if_unknown=False)
 
     await panel_custom.async_register_panel(
         hass,
