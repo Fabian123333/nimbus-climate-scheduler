@@ -1370,7 +1370,7 @@ select {
 /* === HC3-style zone manage buttons + copy row =========================== */
 
 .zone-actions {
-  grid-template-columns: 92px 78px 31px 31px;
+  grid-template-columns: minmax(125px, auto) 92px 78px 31px 31px;
 }
 
 .icon-button {
@@ -1398,6 +1398,10 @@ select {
 
 :host([narrow]) .zone-actions {
   grid-template-columns: auto auto 31px 31px;
+}
+
+:host([narrow]) .zone-members-button {
+  grid-column: 1 / -1;
 }
 
 .copy-actions {
@@ -1543,6 +1547,80 @@ input:focus-visible {
 
 .zone-entity {
   overflow-wrap: anywhere;
+}
+
+.zone-members {
+  max-width: 780px;
+  padding: 4px 0 16px;
+}
+
+.zone-members h3 {
+  margin: 8px 0;
+}
+
+.zone-members p {
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.members-list {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+  margin: 16px 0;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+
+.members-list legend {
+  padding: 0 6px;
+  font-size: 13px;
+}
+
+.member-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 6px;
+  background: var(--surface-2);
+  cursor: pointer;
+}
+
+.member-row:has(input:checked) {
+  border-color: var(--orange-soft);
+}
+
+.member-row input {
+  flex: 0 0 18px;
+  width: 18px;
+  height: 18px;
+  accent-color: var(--orange);
+}
+
+.member-details {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-size: 14px;
+}
+
+.member-entity,
+.member-status {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.zone-members .members-error {
+  color: var(--orange);
+}
+
+.zone-members .setup-actions {
+  flex-wrap: wrap;
 }
 
 .panel-tabs {

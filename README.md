@@ -105,6 +105,20 @@ wizard helps you pick your thermostats and place each one in a zone.
 
 That's it — no YAML required.
 
+### Multiple thermostats in one zone
+
+Use **Thermostats (1)** on a zone to add another radiator or thermostat. Select
+all devices for the room, then **Save thermostats**. For example, add both living
+room radiator thermostats to the Living room zone: they receive the same saved
+temperature plan and are paused/resumed together by its existing Schedule switch.
+
+New members inherit the zone's saved schedules, drafts and active/paused state.
+You can add a second radiator later without recreating the zone or changing its
+automation entity IDs. Thermostats assigned to another zone are shown with that
+zone's name. Removing a member leaves that thermostat under manual control;
+keep at least one member selected. Available Heat/Cool modes and temperature
+ranges must support the existing plan.
+
 ## How it works
 
 - The panel saves each zone's schedule to Home Assistant storage over the

@@ -135,6 +135,28 @@ def async_setup_websocket_api(hass: HomeAssistant) -> None:
         connection.send_result(msg["id"], {"climates": scheduler.store.get_climates()})
 
     @websocket_api.websocket_command({
+        vol.Required("type"): f"{DOMAIN}/set_zone_members",
+        vol.Required("zone_id"): str,
+        vol.Required("source_entity_id"): cv.entity_domain("climate"),
+        vol.Required("entity_ids"): vol.All([cv.entity_domain("climate")], vol.Length(min=1), vol.Unique()),
+        vol.Required("expected_entity_ids"): vol.All([cv.entity_domain("climate")], vol.Length(min=1), vol.Unique()),
+        vol.Required("expected_revision"): vol.All(int, vol.Range(min=0)),
+    })
+    @websocket_api.require_admin
+    @websocket_api.async_response
+    async def websocket_set_zone_members(hass, connection, msg) -> None:
+        scheduler = hass.data[DOMAIN]["scheduler"]
+        try:
+            result = await scheduler.async_set_zone_members(
+                msg["zone_id"], msg["source_entity_id"], msg["entity_ids"],
+                msg["expected_entity_ids"], msg["expected_revision"],
+            )
+        except HomeAssistantError as err:
+            connection.send_error(msg["id"], "invalid_members", str(err))
+            return
+        connection.send_result(msg["id"], result)
+
+    @websocket_api.websocket_command({
         vol.Required("type"): f"{DOMAIN}/set_control",
         vol.Required("entity_id"): cv.entity_domain("climate"),
         vol.Optional("enabled"): bool,
@@ -205,3 +227,4 @@ def async_setup_websocket_api(hass: HomeAssistant) -> None:
     websocket_api.async_register_command(hass, websocket_set_control)
     websocket_api.async_register_command(hass, websocket_subscribe)
     websocket_api.async_register_command(hass, websocket_set_settings)
+    websocket_api.async_register_command(hass, websocket_set_zone_members)

@@ -98,6 +98,7 @@ class NimbusClimateSchedulerPanel extends HTMLElement {
     this.serverClimates = null;
     this.showSetup = false;
     this.setupDraft = null;
+    this.membersDraft = null;
     this.applying = false;
     this.applyResultData = null;
     this.schedulerTimer = null;
@@ -283,8 +284,6 @@ class NimbusClimateSchedulerPanel extends HTMLElement {
     // Entities sharing a zone name form one zone with a shared schedule.
     const groups = new Map();
     for (const config of climateConfigs) {
-      const state = this._hass.states[config.entity];
-      if (!state) continue;
       const groupKey = config.zone_id ?? config.name ?? config.entity;
       if (!groups.has(groupKey)) groups.set(groupKey, []);
       groups.get(groupKey).push(config);
@@ -350,6 +349,10 @@ class NimbusClimateSchedulerPanel extends HTMLElement {
     this._syncing = true;
     try {
       const result = await this._hass.callWS({ type: "nimbus_climate_scheduler/get_zones" });
+      if (this.applying) {
+        this._syncQueued = true;
+        return;
+      }
       this.colorThresholds = result?.settings?.color_thresholds ?? structuredClone(DEFAULT_COLOR_THRESHOLDS);
       this.settingsRevision = result?.settings_revision ?? 0;
       const zones = result?.zones ?? {};
@@ -668,8 +671,9 @@ class NimbusClimateSchedulerPanel extends HTMLElement {
   }
 
   makeZoneFromClimate(config, group = null) {
-    const state = this._hass.states[config.entity];
-    if (!state) return null;
+    // Keep configured members visible even when HA temporarily has no state,
+    // so an unavailable/replaced thermostat can still be removed from its zone.
+    const state = this._hass.states[config.entity] ?? { state: "unavailable", attributes: {} };
     const stored = loadStoredEntitySchedule(config.entity);
 
     const entityIds = group?.entityIds ?? [config.entity];
@@ -730,6 +734,7 @@ class NimbusClimateSchedulerPanel extends HTMLElement {
 
     const zone = {
       id: config.entity,
+      groupId: config.zone_id,
       entityId: config.entity,
       entityIds,
       unavailableEntities,
@@ -879,6 +884,7 @@ class NimbusClimateSchedulerPanel extends HTMLElement {
     for (const zone of this.zones) {
       const schedule = this.getModeSchedule(zone);
       const node = this.zoneTemplate.content.firstElementChild.cloneNode(true);
+      node.dataset.zoneId = zone.id;
       node.classList.toggle("expanded", zone.id === this.selectedZoneId);
       this.renderZoneName(node.querySelector(".zone-name"), zone);
       node.querySelector(".zone-temp").textContent = temperatureLabel(zone.currentTemp);
@@ -904,6 +910,11 @@ class NimbusClimateSchedulerPanel extends HTMLElement {
       });
 
       const body = node.querySelector(".zone-body");
+      if (zone.groupId && this.membersDraft?.zoneId === zone.groupId) {
+        body.append(this.renderZoneMembers(zone));
+        this.zonesEl.append(node);
+        continue;
+      }
       body.append(this.renderZoneScheduleMode(zone));
       if (zone.entityId) {
         body.append(this.renderZoneStatus(zone));
@@ -1550,7 +1561,8 @@ class NimbusClimateSchedulerPanel extends HTMLElement {
     const saveButton = document.createElement("button");
     saveButton.type = "button";
     saveButton.textContent = `Save ${modeTitle(zone.scheduleMode)}`;
-    saveButton.disabled = !this.getModeSchedule(zone).dirty;
+    const editingMembers = Boolean(zone.groupId && this.membersDraft?.zoneId === zone.groupId);
+    saveButton.disabled = this.applying || editingMembers || !this.getModeSchedule(zone).dirty;
     saveButton.addEventListener("click", () => {
       this.saveZoneMode(zone, zone.scheduleMode);
       this.render();
@@ -1583,10 +1595,176 @@ class NimbusClimateSchedulerPanel extends HTMLElement {
     deleteButton.textContent = "🗑";
     deleteButton.title = `Delete ${zone.name} zone`;
     deleteButton.setAttribute("aria-label", `Delete ${zone.name} zone`);
+    deleteButton.disabled = this.applying;
     deleteButton.addEventListener("click", () => this.deleteZone(zone));
 
-    actions.append(saveButton, discardButton, editButton, deleteButton);
+    const membersButton = document.createElement("button");
+    membersButton.type = "button";
+    membersButton.className = "zone-members-button";
+    membersButton.textContent = `Thermostats (${zone.entityIds?.length ?? 1})`;
+    membersButton.setAttribute("aria-label", `Manage thermostats for ${zone.name}`);
+    membersButton.setAttribute("aria-expanded", String(editingMembers));
+    membersButton.disabled = this.applying || !this.backendSyncComplete || !zone.groupId;
+    membersButton.addEventListener("click", () => this.openZoneMembers(zone));
+
+    actions.append(membersButton, saveButton, discardButton, editButton, deleteButton);
     return actions;
+  }
+
+  openZoneMembers(zone) {
+    this.requestNavigation(() => {
+      this.selectedZoneId = zone.id;
+      this.selectedDay = null;
+      this.daySelection = null;
+      this.membersDraft = {
+        zoneId: zone.groupId,
+        sourceEntityId: zone.entityId,
+        original: [...zone.entityIds],
+        selected: [...zone.entityIds],
+        revision: this.scheduleStore.get(zone.id)?.revision ?? 0,
+        error: null,
+      };
+    });
+  }
+
+  renderZoneMembers(zone) {
+    const draft = this.membersDraft;
+    const section = document.createElement("section");
+    section.className = "zone-members";
+    const title = document.createElement("h3");
+    title.textContent = `Thermostats in ${zone.name}`;
+    const hint = document.createElement("p");
+    hint.textContent = "Select one or more thermostats. They share this zone's existing schedule, target temperatures and Schedule switch. New thermostats appear here once added to Home Assistant.";
+    const list = document.createElement("fieldset");
+    list.className = "members-list";
+    const legend = document.createElement("legend");
+    legend.textContent = "Zone thermostats";
+    list.append(legend);
+    const configs = this.getConfiguredClimates();
+    const entityIds = [...new Set([
+      ...draft.original,
+      ...Object.keys(this._hass?.states ?? {}).filter((entityId) => entityId.startsWith("climate.")),
+    ])].sort((left, right) => (
+      Number(draft.original.includes(right)) - Number(draft.original.includes(left)) || left.localeCompare(right)
+    ));
+    for (const entityId of entityIds) {
+      const state = this._hass?.states[entityId];
+      const current = draft.original.includes(entityId);
+      const owner = configs.find((config) => config.entity === entityId);
+      const elsewhere = owner && !current;
+      const unavailable = !state || ["unavailable", "unknown"].includes(state.state);
+      const row = document.createElement("label");
+      row.className = "member-row";
+      const checkbox = document.createElement("input");
+      checkbox.type = "checkbox";
+      checkbox.value = entityId;
+      checkbox.checked = draft.selected.includes(entityId);
+      checkbox.disabled = this.applying || Boolean(elsewhere) || (!current && unavailable);
+      checkbox.setAttribute("aria-label", state?.attributes.friendly_name ?? entityId);
+      checkbox.addEventListener("change", () => {
+        draft.selected = checkbox.checked ? [...draft.selected, entityId] : draft.selected.filter((id) => id !== entityId);
+        draft.error = null;
+        // Keep the focused checkbox in place for keyboard and touch users.
+        updateSaveButton();
+      });
+      const details = document.createElement("span");
+      details.className = "member-details";
+      const name = document.createElement("strong");
+      name.textContent = state?.attributes.friendly_name ?? entityId;
+      const entity = document.createElement("span");
+      entity.className = "member-entity";
+      entity.textContent = entityId;
+      const status = document.createElement("span");
+      status.className = "member-status";
+      status.textContent = elsewhere ? `Assigned to ${owner.name ?? owner.entity}`
+        : unavailable ? "Unavailable" : current ? "In this zone" : "Available to add";
+      details.append(name, entity, status);
+      row.append(checkbox, details);
+      list.append(row);
+    }
+    const note = document.createElement("p");
+    note.textContent = "Keep at least one thermostat selected. Removed thermostats are left under manual control. The zone's schedules and automation entity IDs are retained.";
+    const error = document.createElement("p");
+    error.className = "members-error";
+    error.setAttribute("role", "alert");
+    const actions = document.createElement("div");
+    actions.className = "setup-actions";
+    const cancel = document.createElement("button");
+    cancel.type = "button";
+    cancel.textContent = "Cancel";
+    cancel.disabled = this.applying;
+    cancel.addEventListener("click", () => {
+      this.membersDraft = null;
+      this.render();
+      this.root.querySelector(`.zone[data-zone-id="${zone.id}"] .zone-members-button`)?.focus();
+    });
+    const save = document.createElement("button");
+    save.type = "button";
+    save.className = "setup-confirm";
+    save.textContent = this.applying ? "Saving…" : "Save thermostats";
+    const updateSaveButton = () => {
+      const unchanged = draft.original.length === draft.selected.length && draft.original.every((id) => draft.selected.includes(id));
+      save.disabled = this.applying || !this.backendSyncComplete || !draft.selected.length || unchanged;
+      error.textContent = draft.error ?? (!draft.selected.length ? "Select at least one thermostat." : "");
+    };
+    updateSaveButton();
+    save.addEventListener("click", () => this.saveZoneMembers());
+    actions.append(cancel, save);
+    section.append(title, hint, list, note, error, actions);
+    return section;
+  }
+
+  async saveZoneMembers() {
+    const draft = this.membersDraft;
+    if (!draft?.selected.length || this.applying || !this.backendSyncComplete) return false;
+    const source = this.scheduleStore.get(draft.sourceEntityId);
+    this.applying = true;
+    draft.error = null;
+    this.render();
+    let saved = false;
+    try {
+      const result = await this._hass.callWS({
+        type: "nimbus_climate_scheduler/set_zone_members",
+        zone_id: draft.zoneId,
+        source_entity_id: draft.sourceEntityId,
+        entity_ids: draft.selected,
+        expected_entity_ids: draft.original,
+        expected_revision: draft.revision,
+      });
+      // Carry browser-only drafts with the zone, even when its original
+      // representative thermostat is replaced. Only the backend's saved plan
+      // is applied to the new members.
+      for (const entityId of result.group.entity_ids) {
+        const entry = { ...structuredClone(source), revision: result.revision };
+        this.scheduleStore.set(entityId, entry);
+        saveStoredEntitySchedule(entityId, entry);
+      }
+      for (const entityId of draft.original) {
+        if (result.group.entity_ids.includes(entityId)) continue;
+        this.scheduleStore.delete(entityId);
+        try { window.localStorage.removeItem(storageKey(entityId)); } catch { /* Optional browser cache. */ }
+      }
+      this.serverClimates = result.climates;
+      this.selectedZoneId = result.group.entity_ids[0];
+      this.membersDraft = null;
+      this.zonesSignature = null;
+      this.syncZonesFromHass();
+      const failed = result.apply_result?.failed ?? [];
+      this.applyResultData = failed.length ? {
+        applied: [], failed: failed.map((entityId) => ({ entityId, error: "Thermostats saved; target update failed." })),
+      } : null;
+      saved = true;
+    } catch (error) {
+      draft.error = error?.message ?? "Could not save thermostats. Your selection is kept; please try again.";
+    } finally {
+      this.applying = false;
+      if (saved || this._syncQueued) {
+        this._syncQueued = false;
+        await this.syncBackendSchedules();
+      }
+      this.render();
+    }
+    return saved;
   }
 
   zonesAsClimates() {

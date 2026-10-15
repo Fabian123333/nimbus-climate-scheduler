@@ -276,3 +276,152 @@ async def test_websocket_saves_validate_and_return_revisions(hass, backend, hass
     assert result["success"]
     assert result["result"]["settings"]["color_thresholds"]["heat"]["cold"] == 17
     assert result["result"]["revision"] == 1
+
+
+async def change_members(backend, members, **overrides):
+    """Submit the member selection shown by the current editor."""
+    store, scheduler, _ = backend
+    group = store.zone_groups()[0]
+    arguments = {
+        "zone_id": group["id"], "source_entity_id": group["entity_ids"][0],
+        "entity_ids": members, "expected_entity_ids": group["entity_ids"],
+        "expected_revision": store.get_zone(group["entity_ids"][0]).get("revision", 0),
+    }
+    return await scheduler.async_set_zone_members(**(arguments | overrides))
+
+
+async def test_new_thermostat_inherits_existing_schedule_and_receives_same_target(hass, backend):
+    store, scheduler, _ = backend
+    attributes = {"hvac_modes": ["off", "heat"], "temperature": 15, "min_temp": 5, "max_temp": 30}
+    for entity in ("climate.left", "climate.new"):
+        hass.states.async_set(entity, "heat", attributes)
+    original = store.get_zone("climate.left")
+    group_id = store.zone_groups()[0]["id"]
+    scheduler.async_apply_plan = AsyncMock()
+    await change_members(backend, ["climate.new", "climate.left"])
+    assert store.zone_groups() == [{"id": group_id, "name": "Living room", "entity_ids": ["climate.left", "climate.new"]}]
+    for entity in ("climate.left", "climate.new"):
+        saved = store.get_zone(entity)
+        assert saved == {**original, "revision": 1}
+    plans = [call.args[0] for call in scheduler.async_apply_plan.await_args_list]
+    assert {plan.entity_id for plan in plans} == {"climate.left", "climate.new"}
+    assert plans[0].target_temp == plans[1].target_temp
+    assert plans[0].mode == plans[1].mode == "heat"
+    assert store.get_zone("climate.right") is None
+    with pytest.raises(HomeAssistantError, match="changed elsewhere"):
+        await scheduler.async_set_zone("climate.left", original, expected_revision=0)
+
+
+async def test_replace_all_members_keeps_paused_plan_and_stable_identity_on_reload(hass, backend):
+    store, scheduler, _ = backend
+    group_id = store.zone_groups()[0]["id"]
+    await scheduler.async_set_control(group_id, enabled=False)
+    source = store.get_zone("climate.left")
+    hass.states.async_set("climate.replacement", "heat", {
+        "hvac_modes": ["off", "heat"], "temperature": 15, "min_temp": 5, "max_temp": 30,
+    })
+    scheduler.async_tick = AsyncMock()
+    await change_members(backend, ["climate.replacement"])
+    scheduler.async_tick.assert_not_awaited()
+    assert store.get_zone("climate.replacement") == {**source, "revision": 1}
+    assert store.get_zone("climate.left") is None
+    reloaded = NimbusClimateSchedulerStore(hass)
+    await reloaded.async_load()
+    assert reloaded.zone_groups()[0]["id"] == group_id
+    assert reloaded.as_dict() == store.as_dict()
+
+
+async def test_membership_failure_and_concurrent_edit_leave_original_state(backend):
+    store, scheduler, _ = backend
+    before = store.as_dict()
+    with pytest.raises(HomeAssistantError, match="changed elsewhere"):
+        await change_members(backend, ["climate.left"], expected_entity_ids=["climate.left"])
+    with pytest.raises(HomeAssistantError, match="changed elsewhere"):
+        await change_members(backend, ["climate.left"], expected_revision=99)
+    store._store.async_save = AsyncMock(side_effect=OSError("disk full"))
+    scheduler.async_tick = AsyncMock()
+    with pytest.raises(OSError):
+        await change_members(backend, ["climate.left"])
+    assert store.as_dict() == before
+    scheduler.async_tick.assert_not_awaited()
+
+
+@pytest.mark.parametrize(("state", "attributes", "error"), [
+    ("unavailable", {"hvac_modes": ["off", "heat"]}, "unavailable"),
+    ("cool", {"hvac_modes": ["off", "cool"]}, "schedule mode"),
+    ("fan_only", {"hvac_modes": ["off", "fan_only"]}, "no common"),
+    ("heat", {"hvac_modes": ["off", "heat"], "min_temp": 40, "max_temp": 50}, "no overlapping"),
+    ("heat", {"hvac_modes": ["off", "heat"], "min_temp": 19, "max_temp": 22}, "existing heat plan"),
+])
+async def test_incompatible_new_member_does_not_change_the_zone(hass, backend, state, attributes, error):
+    store, _, _ = backend
+    hass.states.async_set("climate.new", state, attributes)
+    before = store.as_dict()
+    with pytest.raises(HomeAssistantError, match=error):
+        await change_members(backend, ["climate.left", "climate.new"])
+    assert store.as_dict() == before
+
+
+async def test_cannot_assign_a_thermostat_from_another_zone(hass, backend):
+    store, _, _ = backend
+    await store.async_set_climates([
+        {"entity": "climate.left", "name": "Living room"},
+        {"entity": "climate.right", "name": "Bedroom"},
+    ])
+    before = store.as_dict()
+    with pytest.raises(HomeAssistantError, match="already belongs to Bedroom"):
+        await change_members(backend, ["climate.left", "climate.right"])
+    assert store.as_dict() == before
+
+
+async def test_membership_change_updates_the_existing_automation_entities(hass, backend):
+    store, scheduler, _ = backend
+    scheduler.async_tick = AsyncMock()
+    hass.config.components.update({"frontend", "http", "lovelace", "panel_custom", "websocket_api"})
+    entry = MockConfigEntry(domain=DOMAIN)
+    entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+    group_id = store.zone_groups()[0]["id"]
+    registry = er.async_get(hass)
+    switch_id = registry.async_get_entity_id("switch", DOMAIN, f"{group_id}_schedule")
+    select_id = registry.async_get_entity_id("select", DOMAIN, f"{group_id}_schedule_mode")
+    hass.states.async_set("climate.new", "heat", {"hvac_modes": ["off", "heat"], "temperature": 20})
+    await change_members(backend, ["climate.left", "climate.new"])
+    await hass.async_block_till_done()
+    assert hass.states.get(switch_id).attributes["climate_entities"] == ["climate.left", "climate.new"]
+    assert hass.states.get(select_id).attributes["options"] == ["heat"]
+    assert len(hass.states.async_all("switch")) == 1
+    await hass.services.async_call("switch", "turn_off", {"entity_id": switch_id}, blocking=True)
+    assert store.get_zone("climate.new")["activeScheduleMode"] is None
+    assert store.get_zone("climate.left")["activeScheduleMode"] is None
+    with patch("homeassistant.components.frontend.async_remove_panel"):
+        assert await hass.config_entries.async_unload(entry.entry_id)
+
+
+@pytest.mark.timeout(10)
+async def test_member_selection_websocket_schema_and_permissions(hass, backend, hass_ws_client, hass_read_only_access_token):
+    store, scheduler, _ = backend
+    scheduler.async_tick = AsyncMock(return_value={"applied": [], "failed": []})
+    client = await hass_ws_client(hass)
+    async_setup_websocket_api(hass)
+    group = store.zone_groups()[0]
+    message = {
+        "type": f"{DOMAIN}/set_zone_members", "zone_id": group["id"], "source_entity_id": "climate.left",
+        "entity_ids": ["climate.left"], "expected_entity_ids": group["entity_ids"], "expected_revision": 0,
+    }
+    before = store.as_dict()
+    readonly = await hass_ws_client(hass, hass_read_only_access_token)
+    await readonly.send_json({"id": 1, **message})
+    assert not (await readonly.receive_json())["success"]
+    for request_id, members in enumerate([[], ["climate.left", "climate.left"], ["switch.left"]], 1):
+        await client.send_json({"id": request_id, **message, "entity_ids": members})
+        assert not (await client.receive_json())["success"]
+    assert store.as_dict() == before
+    await client.send_json({"id": 4, **message})
+    result = await client.receive_json()
+    assert result["success"]
+    assert result["result"]["group"]["entity_ids"] == ["climate.left"]
+    assert result["result"]["revision"] == 1
+    await client.send_json({"id": 5, **message})
+    assert (await client.receive_json())["error"]["code"] == "invalid_members"

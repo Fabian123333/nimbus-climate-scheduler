@@ -42,6 +42,108 @@ describe("Nimbus Climate Scheduler panel", () => {
     return { panel, zone, schedule: zone.modes.heat };
   }
 
+  function membershipPanel() {
+    const result = editingPanel();
+    const { panel, zone } = result;
+    zone.groupId = "living-room";
+    zone.name = "Living room";
+    panel.backendSyncComplete = true;
+    panel.getOrCreateStoreEntry(zone.id).revision = 4;
+    panel.serverClimates = [
+      { entity: "climate.room", name: "Living room", zone_id: "living-room" },
+      { entity: "climate.bedroom", name: "Bedroom", zone_id: "bedroom" },
+    ];
+    panel._hass.states["climate.room"].attributes.friendly_name = "Living room radiator 1";
+    panel._hass.states["climate.additional"] = climateState("heat");
+    panel._hass.states["climate.additional"].attributes.friendly_name = "Living room radiator 2";
+    panel._hass.states["climate.bedroom"] = climateState("heat");
+    panel.openZoneMembers(zone);
+    return result;
+  }
+
+  it("offers explicit member selection and prevents empty or duplicate zone assignments", () => {
+    const { panel, zone } = membershipPanel();
+    const editor = panel.renderZoneMembers(zone);
+    document.body.append(editor);
+    const current = editor.querySelector('input[value="climate.room"]');
+    const additional = editor.querySelector('input[value="climate.additional"]');
+    const elsewhere = editor.querySelector('input[value="climate.bedroom"]');
+    const save = editor.querySelector(".setup-confirm");
+    expect(current.checked).toBe(true);
+    expect(elsewhere.disabled).toBe(true);
+    expect(editor.textContent).toContain("Assigned to Bedroom");
+    expect(save.disabled).toBe(true);
+    current.click();
+    expect(save.disabled).toBe(true);
+    expect(editor.textContent).toContain("Select at least one thermostat.");
+    additional.click();
+    expect(save.disabled).toBe(false);
+    expect(panel.membersDraft.selected).toEqual(["climate.additional"]);
+    expect(zone.entityIds).toEqual(["climate.room"]);
+  });
+
+  it("carries drafts and the existing plan when replacing a zone's original thermostat", async () => {
+    const { panel, zone, schedule } = membershipPanel();
+    const savedModes = structuredClone(zone.modes);
+    panel.membersDraft.selected = ["climate.additional"];
+    schedule.draftWeek.Mon[0].temp = 22;
+    schedule.dirty = true;
+    const climates = [
+      { entity: "climate.additional", name: "Living room", zone_id: "living-room" },
+      panel.serverClimates[1],
+    ];
+    panel._hass.callWS = vi.fn().mockImplementation(async (command) => {
+      if (command.type.endsWith("set_zone_members")) return {
+        climates, group: { id: "living-room", name: "Living room", entity_ids: ["climate.additional"] }, revision: 5,
+      };
+      return { climates, zones: {
+        "climate.additional": { modes: savedModes, scheduleMode: "heat", activeScheduleMode: null, revision: 5 },
+        "climate.bedroom": { modes: savedModes, scheduleMode: "heat", activeScheduleMode: null, revision: 0 },
+      } };
+    });
+    expect(await panel.saveZoneMembers()).toBe(true);
+    const living = panel.zones.find((item) => item.groupId === "living-room");
+    expect(living.entityIds).toEqual(["climate.additional"]);
+    expect(living.modes.heat.savedWeek.Mon[0].temp).toBe(20);
+    expect(living.modes.heat.draftWeek.Mon[0].temp).toBe(22);
+    expect(living.modes.heat.dirty).toBe(true);
+    expect(living.activeScheduleMode).toBeNull();
+    expect(panel.scheduleStore.get("climate.additional").revision).toBe(5);
+    expect(panel.selectedZoneId).toBe("climate.additional");
+    expect(panel.membersDraft).toBeNull();
+    expect(panel._hass.callWS.mock.calls[0][0]).toEqual({
+      type: "nimbus_climate_scheduler/set_zone_members", zone_id: "living-room",
+      source_entity_id: "climate.room", entity_ids: ["climate.additional"],
+      expected_entity_ids: ["climate.room"], expected_revision: 4,
+    });
+    expect(panel._hass.callWS).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps the member selection and schedules on a failed save", async () => {
+    const { panel, zone } = membershipPanel();
+    const before = structuredClone(zone.modes);
+    panel.membersDraft.selected.push("climate.additional");
+    panel._hass.callWS = vi.fn().mockRejectedValue({ message: "Schedule changed elsewhere" });
+    expect(await panel.saveZoneMembers()).toBe(false);
+    expect(panel.membersDraft.error).toBe("Schedule changed elsewhere");
+    expect(panel.membersDraft.selected).toEqual(["climate.room", "climate.additional"]);
+    expect(zone.entityIds).toEqual(["climate.room"]);
+    expect(zone.modes).toEqual(before);
+    expect(panel.applying).toBe(false);
+  });
+
+  it("keeps missing configured thermostats visible for replacement", () => {
+    const { panel } = membershipPanel();
+    delete panel._hass.states["climate.room"];
+    panel.syncZonesFromHass();
+    const zone = panel.zones.find((item) => item.groupId === "living-room");
+    expect(zone.entityIds).toEqual(["climate.room"]);
+    expect(zone.unavailableEntities).toEqual(["climate.room"]);
+    const checkbox = panel.renderZoneMembers(zone).querySelector('input[value="climate.room"]');
+    expect(checkbox.checked).toBe(true);
+    expect(checkbox.disabled).toBe(false);
+  });
+
   it("edits matching days together without changing saved schedules", () => {
     const { panel, zone, schedule } = editingPanel();
     const saved = structuredClone(schedule.savedWeek);

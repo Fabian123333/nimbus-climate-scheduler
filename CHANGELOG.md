@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Add an explicit per-zone thermostat selector. Multiple radiators share the
+  existing schedule and automation controls; adding or replacing members keeps
+  saved plans, drafts and the zone's stable identity in one atomic update.
 - Add and remove daily intervals, enter start times directly, and adjust timeline
   boundaries with the keyboard. New schedules start with one all-day interval.
 - Group matching days and edit weekdays, weekends or custom day selections

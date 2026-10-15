@@ -255,6 +255,56 @@ class NimbusClimateScheduler:
         async with self._lock:
             await self.store.async_set_climates(climates)
 
+    async def async_set_zone_members(
+        self, zone_id: str, source_entity_id: str, entity_ids: list[str],
+        expected_entity_ids: list[str], expected_revision: int,
+    ) -> dict:
+        """Attach thermostats to the existing saved plan, never a new default."""
+        async with self._lock:
+            group = self.store.get_group(zone_id)
+            if group is None or group["id"] != zone_id:
+                raise HomeAssistantError("This zone no longer exists. Reload the zone list.")
+            added = set(entity_ids) - set(group["entity_ids"])
+            if added:
+                self._validate_zone_members(source_entity_id, entity_ids, added)
+            group = await self.store.async_set_zone_members(
+                zone_id, source_entity_id, entity_ids, expected_entity_ids, expected_revision,
+            )
+            zone = self.store.get_zone(group["entity_ids"][0])
+            result = {"climates": self.store.get_climates(), "group": group, "revision": zone.get("revision", 0)}
+        if zone.get("activeScheduleMode") in ACTIVE_MODES:
+            result["apply_result"] = await self.async_tick()
+        return result
+
+    def _validate_zone_members(self, source_entity_id: str, entity_ids: list[str], added: set[str]) -> None:
+        """Ensure the existing plan can run on every newly selected thermostat."""
+        states = []
+        for entity_id in entity_ids:
+            state = self.hass.states.get(entity_id)
+            if state is None or (entity_id in added and state.state in {"unavailable", "unknown"}):
+                raise HomeAssistantError(f"{entity_id} is unavailable. Try again when it is connected.")
+            states.append(state)
+        common_modes = self.supported_modes({"entity_ids": entity_ids})
+        if not common_modes:
+            raise HomeAssistantError("The selected thermostats have no common Heat/Cool mode.")
+        minimum = max(coerce_number(state.attributes.get("min_temp"), -math.inf) for state in states)
+        maximum = min(coerce_number(state.attributes.get("max_temp"), math.inf) for state in states)
+        if minimum > maximum:
+            raise HomeAssistantError("The selected thermostats have no overlapping temperature range.")
+        source = self.store.get_zone(source_entity_id) or {}
+        mode = source.get("activeScheduleMode") or source.get("resumeScheduleMode") or source.get("scheduleMode")
+        if mode not in common_modes:
+            raise HomeAssistantError("Select a schedule mode supported by all thermostats before adding them.")
+        for schedule_mode in common_modes:
+            schedule = source.get("modes", {}).get(schedule_mode, {})
+            for week_name in ("savedWeek", "draftWeek"):
+                for points in schedule.get(week_name, {}).values():
+                    if any(not minimum <= point["temp"] <= maximum for point in points):
+                        raise HomeAssistantError(
+                            f"The existing {schedule_mode} plan is outside the shared temperature range "
+                            f"({minimum}–{maximum} {self.temperature_unit()}). Adjust it before adding these thermostats."
+                        )
+
     def supported_modes(self, group: dict) -> list[str]:
         """Return only modes supported by every thermostat in a zone."""
         modes = ["heat", "cool"]

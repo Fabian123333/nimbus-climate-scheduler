@@ -94,6 +94,62 @@ class NimbusClimateSchedulerStore:
         return next((group for group in self.zone_groups()
                      if zone_or_entity_id == group["id"] or zone_or_entity_id in group["entity_ids"]), None)
 
+    async def async_set_zone_members(
+        self, zone_id: str, source_entity_id: str, entity_ids: list[str],
+        expected_entity_ids: list[str], expected_revision: int,
+    ) -> dict:
+        """Change membership and inherit the existing plan in one transaction."""
+        async with self._lock:
+            group = self.get_group(zone_id)
+            if group is None or group["id"] != zone_id:
+                raise HomeAssistantError("This zone no longer exists. Reload the zone list.")
+            previous = group["entity_ids"]
+            if set(previous) != set(expected_entity_ids) or source_entity_id not in previous:
+                raise HomeAssistantError("The zone's thermostats changed elsewhere. Reopen the thermostat selection.")
+            source = self.get_zone(source_entity_id)
+            if source is None or source.get("revision", 0) != expected_revision:
+                raise HomeAssistantError("This schedule changed elsewhere. Reopen the thermostat selection.")
+            if not entity_ids or len(entity_ids) != len(set(entity_ids)):
+                raise HomeAssistantError("Select at least one thermostat, without duplicates.")
+            for entity_id in entity_ids:
+                owner = self.get_group(entity_id)
+                if owner and owner["id"] != zone_id:
+                    raise HomeAssistantError(f"{entity_id} already belongs to {owner['name']}.")
+            if set(previous) == set(entity_ids):
+                return group
+
+            # Keep the representative thermostat/order where possible. A full
+            # replacement still retains the zone's identity and its schedule.
+            members = [entity for entity in previous if entity in entity_ids]
+            members.extend(entity for entity in entity_ids if entity not in previous)
+            data = deepcopy(self.data)
+            existing = {item["entity"]: item for item in data["climates"]}
+            replacements = [
+                {**existing.get(entity, {}), "entity": entity, "name": group["name"], "zone_id": zone_id}
+                for entity in members
+            ]
+            configs = []
+            for item in data["climates"]:
+                if item["zone_id"] == zone_id:
+                    if replacements:
+                        configs.extend(replacements)
+                        replacements = []
+                else:
+                    configs.append(item)
+            data["climates"] = configs
+            # Invalidate old editors even if the saved temperatures are unchanged.
+            revision = max(
+                (data["zones"].get(entity, {}).get("revision", 0) for entity in {*previous, *members}),
+                default=0,
+            ) + 1
+            for entity in previous:
+                if entity not in members:
+                    data["zones"].pop(entity, None)
+            for entity in members:
+                data["zones"][entity] = {**deepcopy(source), "revision": revision}
+            await self._async_commit(data)
+            return self.get_group(zone_id)
+
     def zone_entity_ids(self) -> list[str]:
         return list(self.data.get("zones", {}).keys())
 
