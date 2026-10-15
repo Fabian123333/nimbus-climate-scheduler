@@ -19,6 +19,10 @@
   stable zone identities, reject stale saves, and synchronize automation changes
   to open clients. Failed saves retain editable drafts.
 - Fingerprint frontend assets to invalidate stale browser caches on upgrades.
+- Preserve existing plans during zone setup, reject concurrent membership edits,
+  and defer live schedule refreshes while typing or dragging interval boundaries.
+- Show next-day changes after an all-day interval and use translated automation
+  entity names without changing existing entity IDs.
 
 ## 2026-07-22 · Quiet panel re-registration (v0.2.15)
 

@@ -10,7 +10,6 @@ async def async_setup_entry(hass, entry, async_add_entities):
 
 class NimbusScheduleSwitch(NimbusZoneEntity, SwitchEntity):
     _attr_translation_key = "schedule"
-    _attr_name = "Schedule"
     _attr_icon = "mdi:calendar-clock"
 
     def __init__(self, scheduler, zone_id):

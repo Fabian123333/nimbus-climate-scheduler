@@ -59,7 +59,65 @@ async def test_additive_migration_and_stable_group_identity(hass, backend):
     reloaded = NimbusClimateSchedulerStore(hass)
     await reloaded.async_load()
     assert reloaded.zone_groups()[0]["id"] == group_id
-    assert reloaded.get_zone("climate.right") == original["zones"]["climate.right"]
+    assert reloaded.get_zone("climate.right") == {**original["zones"]["climate.right"], "revision": 1}
+
+
+async def test_zone_setup_inherits_existing_plan_even_when_new_member_sorts_first(hass, backend):
+    store, scheduler, original = backend
+    hass.states.async_set("climate.additional", "heat", {
+        "hvac_modes": ["heat"], "temperature": 15, "min_temp": 5, "max_temp": 30,
+    })
+    group_id = store.zone_groups()[0]["id"]
+    await scheduler.async_set_climates([
+        {"entity": entity, "name": "Living room"}
+        for entity in ("climate.additional", "climate.right", "climate.left")
+    ], expected_revision=0)
+    assert store.zone_groups()[0]["id"] == group_id
+    assert store.get_zone("climate.additional") == {**original["zones"]["climate.left"], "revision": 1}
+    for entity in original["zones"]:
+        assert store.get_zone(entity) == {**original["zones"][entity], "revision": 1}
+    with pytest.raises(HomeAssistantError, match="changed elsewhere"):
+        await scheduler.async_set_zone("climate.left", original["zones"]["climate.left"], expected_revision=0)
+
+
+async def test_stale_zone_setup_cannot_undo_membership_changes(backend):
+    store, scheduler, _ = backend
+    climates = store.get_climates()
+    await change_members(backend, ["climate.left"])
+    before = store.as_dict()
+    with pytest.raises(HomeAssistantError, match="zone list changed"):
+        await scheduler.async_set_climates(climates, expected_revision=0)
+    assert store.as_dict() == before
+
+
+async def test_zone_setup_rejects_duplicate_thermostats_and_merging_existing_plans(backend):
+    store, scheduler, _ = backend
+    before = store.as_dict()
+    with pytest.raises(HomeAssistantError, match="only appear once"):
+        await scheduler.async_set_climates([{"entity": "climate.left"}, {"entity": "climate.left"}])
+    assert store.as_dict() == before
+    await scheduler.async_set_climates([
+        {"entity": "climate.left", "name": "Living room"},
+        {"entity": "climate.right", "name": "Bedroom"},
+    ])
+    before = store.as_dict()
+    with pytest.raises(HomeAssistantError, match="distinct names"):
+        await scheduler.async_set_climates([
+            {"entity": "climate.left", "name": "Merged"},
+            {"entity": "climate.right", "name": "Merged"},
+        ])
+    assert store.as_dict() == before
+
+
+async def test_zone_setup_applies_the_same_member_compatibility_checks(hass, backend):
+    store, scheduler, _ = backend
+    hass.states.async_set("climate.additional", "cool", {"hvac_modes": ["cool"]})
+    before = store.as_dict()
+    with pytest.raises(HomeAssistantError, match="schedule mode"):
+        await scheduler.async_set_climates([
+            *store.get_climates(), {"entity": "climate.additional", "name": "Living room"},
+        ])
+    assert store.as_dict() == before
 
 
 async def test_failed_write_keeps_last_committed_state(backend):
@@ -147,6 +205,7 @@ async def test_stale_browser_cannot_resurrect_a_deleted_zone(backend):
 async def test_real_ha_switch_select_lifecycle(hass, backend):
     store, scheduler, _ = backend
     scheduler.async_tick = AsyncMock()
+    hass.config.language = "de"
     # Browser assets are exercised separately; keep this a real HA entity and
     # config-entry lifecycle test without loading the optional frontend wheel.
     hass.config.components.update({"frontend", "http", "lovelace", "panel_custom", "websocket_api"})
@@ -160,6 +219,8 @@ async def test_real_ha_switch_select_lifecycle(hass, backend):
     select_id = registry.async_get_entity_id("select", DOMAIN, f"{group_id}_schedule_mode")
     assert hass.states.get(switch_id).state == "on"
     assert hass.states.get(select_id).state == "heat"
+    assert hass.states.get(switch_id).attributes["friendly_name"] == "Living room Zeitplan"
+    assert hass.states.get(select_id).attributes["friendly_name"] == "Living room Zeitplanmodus"
 
     await hass.services.async_call("switch", "turn_off", {"entity_id": switch_id}, blocking=True)
     await hass.services.async_call("select", "select_option", {"entity_id": select_id, "option": "cool"}, blocking=True)
@@ -276,6 +337,25 @@ async def test_websocket_saves_validate_and_return_revisions(hass, backend, hass
     assert result["success"]
     assert result["result"]["settings"]["color_thresholds"]["heat"]["cold"] == 17
     assert result["result"]["revision"] == 1
+
+
+@pytest.mark.timeout(10)
+async def test_zone_setup_websocket_rejects_stale_selection(hass, backend, hass_ws_client):
+    store, _, _ = backend
+    client = await hass_ws_client(hass)
+    async_setup_websocket_api(hass)
+    command = {
+        "type": f"{DOMAIN}/set_climates", "expected_revision": 0,
+        "climates": [{"entity": "climate.left", "name": "Renamed"}],
+    }
+    await client.send_json({"id": 1, **command})
+    result = await client.receive_json()
+    assert result["success"]
+    assert result["result"]["revision"] == 1
+    before = store.as_dict()
+    await client.send_json({"id": 2, **command})
+    assert (await client.receive_json())["error"]["code"] == "conflict"
+    assert store.as_dict() == before
 
 
 async def change_members(backend, members, **overrides):

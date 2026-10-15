@@ -251,9 +251,19 @@ class NimbusClimateScheduler:
                     raise HomeAssistantError("This schedule changed elsewhere. Reload it before saving.")
             await self.store.async_set_zones({key: zone_data for key in entity_ids})
 
-    async def async_set_climates(self, climates: list[dict]) -> None:
+    async def async_set_climates(self, climates: list[dict], expected_revision: int | None = None) -> None:
         async with self._lock:
-            await self.store.async_set_climates(climates)
+            groups: dict[str, list[str]] = {}
+            for item in climates:
+                groups.setdefault(item.get("name") or item["entity"], []).append(item["entity"])
+            for members in groups.values():
+                source = next((item["entity"] for item in self.store.get_climates()
+                               if item["entity"] in members and self.store.get_zone(item["entity"]) is not None), None)
+                if source is not None:
+                    added = set(members) - set(self.store.get_group(source)["entity_ids"])
+                    if added:
+                        self._validate_zone_members(source, members, added)
+            await self.store.async_set_climates(climates, expected_revision)
 
     async def async_set_zone_members(
         self, zone_id: str, source_entity_id: str, entity_ids: list[str],

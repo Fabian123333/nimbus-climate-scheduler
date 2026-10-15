@@ -240,6 +240,95 @@ describe("Nimbus Climate Scheduler panel", () => {
     expect(panel._hass.callWS).toHaveBeenCalledExactlyOnceWith({ type: "nimbus_climate_scheduler/get_zones" });
   });
 
+  it("saves zone setup without writing existing schedules or local drafts back", async () => {
+    const { panel, zone, schedule } = editingPanel();
+    const data = { scheduleMode: "heat", activeScheduleMode: null, modes: structuredClone(zone.modes), revision: 3 };
+    panel.getOrCreateStoreEntry(zone.id).revision = 3;
+    panel.updateDraftDay(zone, "Mon", (points) => { points[0].temp = 22; });
+    panel.backendSyncComplete = true;
+    panel.climatesRevision = 7;
+    panel.openSetup();
+    panel.setupDraft = [{ entity: zone.entityId, name: "Renamed", checked: true }];
+    const climates = [{ entity: zone.entityId, name: "Renamed", zone_id: "room" }];
+    panel._hass.callWS = vi.fn().mockImplementation(async (command) => (
+      command.type.endsWith("set_climates") ? { climates, revision: 8 }
+        : { climates, climates_revision: 8, zones: { [zone.entityId]: data } }
+    ));
+    await panel.applySetup();
+    expect(panel._hass.callWS.mock.calls.map(([command]) => command.type)).toEqual([
+      "nimbus_climate_scheduler/set_climates", "nimbus_climate_scheduler/get_zones",
+    ]);
+    expect(panel._hass.callWS.mock.calls[0][0].expected_revision).toBe(7);
+    expect(panel.zones[0].name).toBe("Renamed");
+    expect(panel.zones[0].modes.heat).toBe(schedule);
+    expect(schedule.savedWeek.Mon[0].temp).toBe(20);
+    expect(schedule.draftWeek.Mon[0].temp).toBe(22);
+    expect(panel.zones[0].activeScheduleMode).toBeNull();
+  });
+
+  it("keeps a conflicting zone selection tied to the revision that was opened", async () => {
+    const { panel, zone } = editingPanel();
+    panel.backendSyncComplete = true;
+    panel.climatesRevision = 7;
+    panel.openSetup();
+    panel.setupDraft = [{ entity: zone.entityId, name: "Renamed", checked: true }];
+    panel.climatesRevision = 8; // A live notification arrived while setup was open.
+    const data = { modes: structuredClone(zone.modes), activeScheduleMode: null };
+    panel._hass.callWS = vi.fn().mockImplementation(async (command) => {
+      if (command.type.endsWith("set_climates")) throw { message: "The zone list changed elsewhere." };
+      return { climates: [{ entity: zone.entityId }], climates_revision: 8, zones: { [zone.entityId]: data } };
+    });
+    await panel.applySetup();
+    expect(panel._hass.callWS.mock.calls[0][0].expected_revision).toBe(7);
+    expect(panel.showSetup).toBe(true);
+    expect(panel.setupDraft[0].name).toBe("Renamed");
+    expect(panel.applyResultData.failed[0].error).toContain("changed elsewhere");
+  });
+
+  it("defers live synchronization while a temperature input is being edited", async () => {
+    const { panel } = editingPanel();
+    window.matchMedia = vi.fn(() => ({ addEventListener() {}, removeEventListener() {} }));
+    document.body.append(panel);
+    const zone = panel.zones[0];
+    const schedule = zone.modes.heat;
+    panel.getOrCreateStoreEntry(zone.id).revision = 3;
+    const remote = { modes: structuredClone(zone.modes), activeScheduleMode: null, revision: 4 };
+    remote.modes.heat.savedWeek.Mon[0].temp = 21;
+    panel._hass.callWS = vi.fn().mockResolvedValue({
+      climates: [{ entity: zone.entityId }], zones: { [zone.entityId]: remote },
+    });
+    const editor = document.createElement("div");
+    panel.renderSetpointPanel(editor, zone, "Mon", schedule.draftWeek.Mon, schedule.savedWeek.Mon, true);
+    panel.root.append(editor);
+    const input = editor.querySelector('input[type="number"]');
+    input.focus();
+    input.value = "22";
+    await panel.syncBackendSchedules();
+    expect(panel._hass.callWS).not.toHaveBeenCalled();
+    input.dispatchEvent(new Event("change"));
+    input.blur();
+    await vi.waitFor(() => expect(panel._hass.callWS).toHaveBeenCalledTimes(1));
+    expect(panel.zones[0].modes.heat.draftWeek.Mon[0].temp).toBe(22);
+    expect(panel.scheduleStore.get(zone.id).revision).toBe(3);
+  });
+
+  it("keeps a drag draft when a backend response arrives after dragging starts", async () => {
+    const { panel, zone, schedule } = editingPanel();
+    panel.getOrCreateStoreEntry(zone.id).revision = 3;
+    let finish;
+    panel._hass.callWS = vi.fn().mockImplementation(() => new Promise((resolve) => { finish = resolve; }));
+    const pending = panel.syncBackendSchedules();
+    panel.activeDrag = { zoneId: zone.id };
+    schedule.draftWeek.Mon[0].temp = 22;
+    finish({ climates: [{ entity: zone.entityId }], zones: {
+      [zone.entityId]: { modes: structuredClone(zone.modes), revision: 4 },
+    } });
+    await pending;
+    expect(panel.scheduleStore.get(zone.id).revision).toBe(3);
+    expect(panel.zones[0].modes.heat).toBe(schedule);
+    expect(panel._syncQueued).toBe(true);
+  });
+
   it("does not bring back an old server draft after it was discarded locally", async () => {
     const { panel, zone } = editingPanel();
     const data = { scheduleMode: "heat", activeScheduleMode: "heat", modes: structuredClone(zone.modes) };
@@ -310,6 +399,18 @@ describe("Nimbus Climate Scheduler panel", () => {
     expect(panel.renderZoneSwitch(zone).disabled).toBe(true);
     panel.zones = [zone];
     expect(panel.buildApplyPlans()).toEqual([]);
+  });
+
+  it("allows pausing a saved active schedule when thermostat capabilities become incompatible", () => {
+    const { panel, zone } = editingPanel();
+    panel.backendSyncComplete = true;
+    panel.getOrCreateStoreEntry(zone.id).activeScheduleMode = "heat";
+    panel._hass.states[zone.entityId].attributes.hvac_modes = ["off", "fan_only"];
+    const current = panel.makeZoneFromClimate({ entity: zone.entityId });
+    expect(current.capabilitiesCompatible).toBe(false);
+    expect(current.supportedScheduleModes).toEqual([]);
+    expect(current.activeScheduleMode).toBe("heat");
+    expect(panel.renderZoneSwitch(current).disabled).toBe(false);
   });
 
   it("disables a grouped zone without a common temperature range", () => {

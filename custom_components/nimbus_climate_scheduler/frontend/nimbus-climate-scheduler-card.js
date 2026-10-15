@@ -135,12 +135,12 @@
     for (let i = 0; i < setpoints.length; i += 1) {
       if ((setpoints[i].minute ?? 0) <= scheduleMinute) activeIndex = i;
     }
-    const len = setpoints.length;
+    const next = upcomingSetpoint(savedWeek, dayIndex, activeIndex + 1) ?? setpoints[0];
     return {
       current: setpoints[activeIndex],
-      next: upcomingSetpoint(savedWeek, dayIndex, activeIndex + 1) ?? setpoints[0],
+      next,
       scheduleMinute,
-      single: len === 1,
+      single: setpoints.length === 1 && next.temp === setpoints[0].temp,
     };
   }
 

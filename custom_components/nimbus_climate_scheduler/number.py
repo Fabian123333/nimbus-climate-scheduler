@@ -41,7 +41,6 @@ class NimbusColorThreshold(NumberEntity):
         self.band = band
         self._attr_unique_id = f"{DOMAIN}_{mode}_{band}_color_threshold"
         self._attr_translation_key = f"{mode}_{band}_color_threshold"
-        self._attr_name = f"{'Heating' if mode == 'heat' else 'Cooling'} {band} color threshold"
 
     @property
     def native_value(self) -> float:

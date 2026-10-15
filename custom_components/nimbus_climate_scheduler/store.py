@@ -52,13 +52,44 @@ class NimbusClimateSchedulerStore:
         climates = self.data.get("climates")
         return deepcopy(climates) if isinstance(climates, list) else []
 
-    async def async_set_climates(self, climates: list[dict[str, Any]]) -> None:
+    async def async_set_climates(
+        self, climates: list[dict[str, Any]], expected_revision: int | None = None,
+    ) -> None:
         async with self._lock:
+            revision = self.data.get("climates_revision", 0)
+            if expected_revision is not None and expected_revision != revision:
+                raise HomeAssistantError("The zone list changed elsewhere. Reopen zone setup before saving.")
+            if len({item["entity"] for item in climates}) != len(climates):
+                raise HomeAssistantError("Each thermostat can only appear once in the zone list.")
+            previous = self.get_climates()
             data = deepcopy(self.data)
-            data["climates"] = self._with_zone_ids(climates, self.get_climates())
+            data["climates"] = self._with_zone_ids(climates, previous)
+            groups: dict[str, list[str]] = {}
+            for item in data["climates"]:
+                groups.setdefault(item["zone_id"], []).append(item["entity"])
+            for members in groups.values():
+                existing = [item for item in previous if item["entity"] in members]
+                if len({item["zone_id"] for item in existing}) > 1:
+                    raise HomeAssistantError("Existing zones need distinct names so their plans are preserved.")
+                source = next((zone for item in existing
+                               if (zone := self.get_zone(item["entity"])) is not None), None)
+                if source is None:
+                    continue  # The panel initializes genuinely new zones.
+                old_members = self.get_group(existing[0]["zone_id"])["entity_ids"]
+                if set(old_members) == set(members):
+                    continue  # Renaming/reordering never rewrites a plan or draft.
+                schedule_revision = max(
+                    (data["zones"].get(entity, {}).get("revision", 0) for entity in {*old_members, *members}),
+                    default=0,
+                ) + 1
+                for entity in members:
+                    data["zones"].setdefault(entity, deepcopy(source))["revision"] = schedule_revision
             # An explicit removal deletes only the deselected thermostats.
             allowed = {entry["entity"] for entry in climates}
             data["zones"] = {key: value for key, value in data["zones"].items() if key in allowed}
+            if data == self.data:
+                return
+            data["climates_revision"] = revision + 1
             await self._async_commit(data)
 
     @staticmethod
@@ -137,6 +168,7 @@ class NimbusClimateSchedulerStore:
                 else:
                     configs.append(item)
             data["climates"] = configs
+            data["climates_revision"] = data.get("climates_revision", 0) + 1
             # Invalidate old editors even if the saved temperatures are unchanged.
             revision = max(
                 (data["zones"].get(entity, {}).get("revision", 0) for entity in {*previous, *members}),
@@ -187,4 +219,7 @@ class NimbusClimateSchedulerStore:
             await self._async_commit(data)
 
     def as_dict(self) -> dict[str, Any]:
-        return {**deepcopy(self.data), "settings": self.get_settings(), "settings_revision": self.data.get("settings_revision", 0)}
+        return {
+            **deepcopy(self.data), "climates_revision": self.data.get("climates_revision", 0),
+            "settings": self.get_settings(), "settings_revision": self.data.get("settings_revision", 0),
+        }

@@ -10,7 +10,6 @@ async def async_setup_entry(hass, entry, async_add_entities):
 
 class NimbusScheduleMode(NimbusZoneEntity, SelectEntity):
     _attr_translation_key = "schedule_mode"
-    _attr_name = "Schedule mode"
     _attr_icon = "mdi:thermostat"
 
     def __init__(self, scheduler, zone_id):

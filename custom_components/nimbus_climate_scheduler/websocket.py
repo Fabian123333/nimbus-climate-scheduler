@@ -122,6 +122,7 @@ def async_setup_websocket_api(hass: HomeAssistant) -> None:
                 vol.Optional("name"): vol.Any(None, str),
             }, extra=vol.ALLOW_EXTRA)
         ],
+        vol.Optional("expected_revision"): vol.All(int, vol.Range(min=0)),
     })
     @websocket_api.require_admin
     @websocket_api.async_response
@@ -131,8 +132,15 @@ def async_setup_websocket_api(hass: HomeAssistant) -> None:
         msg: dict[str, Any],
     ) -> None:
         scheduler = hass.data[DOMAIN]["scheduler"]
-        await scheduler.async_set_climates(msg["climates"])
-        connection.send_result(msg["id"], {"climates": scheduler.store.get_climates()})
+        try:
+            await scheduler.async_set_climates(msg["climates"], msg.get("expected_revision"))
+        except HomeAssistantError as err:
+            connection.send_error(msg["id"], "conflict", str(err))
+            return
+        connection.send_result(msg["id"], {
+            "climates": scheduler.store.get_climates(),
+            "revision": scheduler.store.data.get("climates_revision", 0),
+        })
 
     @websocket_api.websocket_command({
         vol.Required("type"): f"{DOMAIN}/set_zone_members",

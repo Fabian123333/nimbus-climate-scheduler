@@ -227,12 +227,12 @@ class NimbusClimateSchedulerPanel extends HTMLElement {
 
     // Flush a render deferred while a form control was focused.
     this.root.addEventListener("focusout", () => {
-      if (!this.renderPending) return;
       queueMicrotask(() => {
         const active = this.root.activeElement?.tagName;
         if (this.renderPending && !this.activeDrag && active !== "SELECT" && active !== "INPUT") {
           this.render();
         }
+        this.flushBackendSync();
       });
     });
 
@@ -341,20 +341,32 @@ class NimbusClimateSchedulerPanel extends HTMLElement {
     }
   }
 
+  isEditingSchedule() {
+    return Boolean(this.activeDrag || this.root.activeElement?.matches(".setpoint-editor input"));
+  }
+
+  flushBackendSync() {
+    if (this._syncQueued && !this.applying && !this._syncing && !this.isEditingSchedule()) {
+      this._syncQueued = false;
+      this.syncBackendSchedules();
+    }
+  }
+
   async syncBackendSchedules() {
-    if (this.applying || this._syncing) {
+    if (this.applying || this._syncing || this.isEditingSchedule()) {
       this._syncQueued = true;
       return;
     }
     this._syncing = true;
     try {
       const result = await this._hass.callWS({ type: "nimbus_climate_scheduler/get_zones" });
-      if (this.applying) {
+      if (this.applying || this.isEditingSchedule()) {
         this._syncQueued = true;
         return;
       }
       this.colorThresholds = result?.settings?.color_thresholds ?? structuredClone(DEFAULT_COLOR_THRESHOLDS);
       this.settingsRevision = result?.settings_revision ?? 0;
+      this.climatesRevision = result?.climates_revision ?? 0;
       const zones = result?.zones ?? {};
       this.serverClimates = Array.isArray(result?.climates)
         ? result.climates
@@ -382,7 +394,7 @@ class NimbusClimateSchedulerPanel extends HTMLElement {
           entry.revision = data.revision ?? 0;
         }
         entry.scheduleMode ??= this.normalizeScheduleMode(data.scheduleMode, supportedModes);
-        entry.activeScheduleMode = this.normalizeActiveScheduleMode(data.activeScheduleMode, supportedModes);
+        entry.activeScheduleMode = this.normalizeActiveScheduleMode(data.activeScheduleMode, ["heat", "cool"]);
         entry.resumeScheduleMode = data.resumeScheduleMode ?? data.activeScheduleMode ?? data.scheduleMode;
         loaded = true;
       }
@@ -418,21 +430,14 @@ class NimbusClimateSchedulerPanel extends HTMLElement {
       }, 5000);
     } finally {
       this._syncing = false;
-      if (this._syncQueued && !this.applying) {
-        this._syncQueued = false;
-        this.syncBackendSchedules();
-      }
+      this.flushBackendSync();
     }
-  }
-
-  async pushAllSchedulesToBackend() {
-    if (!this._hass?.callWS) return;
-    await Promise.all(this.zones.map((zone) => this.saveZoneToBackend(zone)));
   }
 
   openSetup() {
     this.activeTab = "schedules";
     this.setupDraft = null;
+    this.setupRevision = this.climatesRevision;
     this.showSetup = true;
     this.render();
   }
@@ -482,36 +487,36 @@ class NimbusClimateSchedulerPanel extends HTMLElement {
 
   async applySetup() {
     const chosen = (this.setupDraft ?? []).filter((item) => item.checked);
-    if (!chosen.length) return;
+    if (!chosen.length || this.applying || !this.backendSyncComplete) return;
 
     const climates = chosen.map((item) => ({
       entity: item.entity,
       name: item.name?.trim() || null,
     }));
 
-    if (this._hass?.callWS) {
-      try {
-        const result = await this._hass.callWS({
-          type: "nimbus_climate_scheduler/set_climates",
-          climates,
-        });
-        this.serverClimates = result.climates;
-      } catch {
-        this.showError("Could not save the zone selection.");
-        return;
-      }
-    }
-
-    this.serverClimates ??= climates;
-    this.showSetup = false;
-    this.setupDraft = null;
-    this.zonesSignature = null;
-    this.syncZonesFromHass();
+    this.applying = true;
     this.render();
     try {
-      await this.pushAllSchedulesToBackend();
+      const result = await this._hass.callWS({
+        type: "nimbus_climate_scheduler/set_climates",
+        climates,
+        expected_revision: this.setupRevision ?? this.climatesRevision ?? 0,
+      });
+      this.serverClimates = result.climates;
+      this.climatesRevision = result.revision;
+      this.showSetup = false;
+      this.setupDraft = null;
+      this.setupRevision = undefined;
+      this.applyResultData = null;
     } catch (error) {
-      this.showError(error?.message ?? "Could not initialize all zone schedules.");
+      this.showError(error?.message ?? "Could not save the zone selection.");
+    } finally {
+      this.applying = false;
+      this._syncQueued = false;
+      // Fetch committed plans and initialize only genuinely new zones. Setup
+      // must never write an existing saved plan or browser draft back to HA.
+      await this.syncBackendSchedules();
+      this.render();
     }
   }
 
@@ -521,6 +526,7 @@ class NimbusClimateSchedulerPanel extends HTMLElement {
     if (!this.showSetup) return;
 
     this.setupDraft ??= this.buildSetupDraft();
+    this.setupRevision ??= this.climatesRevision;
 
     const title = document.createElement("h2");
     title.className = "setup-title";
@@ -528,7 +534,7 @@ class NimbusClimateSchedulerPanel extends HTMLElement {
 
     const hint = document.createElement("p");
     hint.className = "setup-hint";
-    hint.textContent = "Pick the thermostats to schedule and place each one in a zone — the room it lives in is suggested by default. Thermostats sharing a zone name follow one shared schedule. Each zone gets a default Heat and Cool schedule you can fine-tune afterwards.";
+    hint.textContent = "Pick the thermostats to schedule and name each zone. Existing plans are preserved; new thermostats sharing a zone name inherit its plan. New zones start with a default plan you can edit afterwards.";
 
     const list = document.createElement("div");
     list.className = "setup-list";
@@ -547,6 +553,7 @@ class NimbusClimateSchedulerPanel extends HTMLElement {
       const checkbox = document.createElement("input");
       checkbox.type = "checkbox";
       checkbox.checked = item.checked;
+      checkbox.disabled = this.applying;
       checkbox.addEventListener("change", () => {
         item.checked = checkbox.checked;
         row.classList.toggle("selected", item.checked);
@@ -562,6 +569,7 @@ class NimbusClimateSchedulerPanel extends HTMLElement {
 
       const name = document.createElement("input");
       name.type = "text";
+      name.disabled = this.applying;
       name.className = "setup-name";
       name.value = item.name;
       name.placeholder = "Zone";
@@ -581,13 +589,14 @@ class NimbusClimateSchedulerPanel extends HTMLElement {
     const cancel = document.createElement("button");
     cancel.type = "button";
     cancel.textContent = "Cancel";
+    cancel.disabled = this.applying;
     cancel.addEventListener("click", () => this.closeSetup());
 
     const confirm = document.createElement("button");
     confirm.type = "button";
     confirm.className = "setup-confirm";
-    confirm.textContent = "Create zones";
-    confirm.disabled = !this.setupDraft.some((item) => item.checked);
+    confirm.textContent = this.applying ? "Saving…" : "Save zones";
+    confirm.disabled = this.applying || !this.backendSyncComplete || !this.setupDraft.some((item) => item.checked);
     confirm.addEventListener("click", () => this.applySetup());
 
     actions.append(cancel, confirm);
@@ -601,7 +610,7 @@ class NimbusClimateSchedulerPanel extends HTMLElement {
       type: "nimbus_climate_scheduler/save_zone",
       entity_id: zone.entityId,
       data,
-      ...(entry.revision !== undefined ? { expected_revision: entry.revision } : {}),
+      expected_revision: entry.revision ?? 0,
     });
     entry.revision = result?.revision ?? entry.revision;
   }
@@ -708,16 +717,10 @@ class NimbusClimateSchedulerPanel extends HTMLElement {
       entry.scheduleMode ?? stored?.scheduleMode ?? config.schedule_mode,
       supportedModes,
     );
-    const activeScheduleMode = capabilitiesCompatible
-      ? this.normalizeActiveScheduleMode(
-          entry.activeScheduleMode !== undefined
-            ? entry.activeScheduleMode
-            : Object.prototype.hasOwnProperty.call(stored ?? {}, "activeScheduleMode")
-              ? stored.activeScheduleMode
-               : null,
-          supportedModes,
-        )
-      : null;
+    const activeScheduleMode = this.normalizeActiveScheduleMode(
+      entry.activeScheduleMode !== undefined ? entry.activeScheduleMode : stored?.activeScheduleMode,
+      ["heat", "cool"],
+    );
     const modes = this.getOrCreateSchedules(config.entity, state, stored?.modes);
     this.ensureSchedulesForModes(modes, supportedModes, state);
 
@@ -793,9 +796,8 @@ class NimbusClimateSchedulerPanel extends HTMLElement {
   }
 
   getSupportedScheduleModes(state) {
-    const hvacModes = Array.isArray(state.attributes.hvac_modes) ? state.attributes.hvac_modes : [];
-    const supported = ["heat", "cool"].filter((mode) => hvacModes.includes(mode));
-    return supported.length ? supported : ["heat", "cool"];
+    const hvacModes = state.attributes.hvac_modes;
+    return Array.isArray(hvacModes) ? ["heat", "cool"].filter((mode) => hvacModes.includes(mode)) : ["heat", "cool"];
   }
 
   normalizeScheduleMode(mode, supportedModes) {
@@ -879,7 +881,10 @@ class NimbusClimateSchedulerPanel extends HTMLElement {
 
     this.zonesEl.replaceChildren();
     this.zonesEl.hidden = this.showSetup || this.activeTab !== "schedules";
-    if (this.zonesEl.hidden) return;
+    if (this.zonesEl.hidden) {
+      this.flushBackendSync();
+      return;
+    }
 
     for (const zone of this.zones) {
       const schedule = this.getModeSchedule(zone);
@@ -928,6 +933,7 @@ class NimbusClimateSchedulerPanel extends HTMLElement {
 
       this.zonesEl.append(node);
     }
+    this.flushBackendSync();
   }
 
   getDayGroups(zone) {
@@ -1275,7 +1281,7 @@ class NimbusClimateSchedulerPanel extends HTMLElement {
             (points[index + 1]?.minute ?? DAY_LENGTH_MINUTES) - 1);
         });
         this.render();
-        this.root.querySelector(`[data-day="${day}"] .handle[data-index="${index + 1}"]`)?.focus();
+        this.root.querySelector(`.zone[data-zone-id="${zone.id}"] [data-day="${day}"] .handle[data-index="${index + 1}"]`)?.focus();
       });
       handlesEl.append(handle);
     });
@@ -1777,6 +1783,7 @@ class NimbusClimateSchedulerPanel extends HTMLElement {
   }
 
   async deleteZone(zone) {
+    if (this.applying || !this.backendSyncComplete) return;
     const confirmed = window.confirm(
       `Delete zone "${zone.name}" and its schedules? The thermostat itself is not affected.`,
     );
@@ -1786,16 +1793,23 @@ class NimbusClimateSchedulerPanel extends HTMLElement {
     const remaining = (this.serverClimates ?? this.zonesAsClimates())
       .filter((entry) => !zoneEntities.includes(entry.entity));
 
-    if (this._hass?.callWS) {
-      try {
-        await this._hass.callWS({
-          type: "nimbus_climate_scheduler/set_climates",
-          climates: remaining,
-        });
-      } catch {
-        this.showError("Could not delete the zone. Please try again.", zone.name);
-        return;
-      }
+    this.applying = true;
+    this.renderIfReady();
+    try {
+      const result = await this._hass.callWS({
+        type: "nimbus_climate_scheduler/set_climates",
+        climates: remaining,
+        expected_revision: this.climatesRevision ?? 0,
+      });
+      this.serverClimates = result.climates;
+      this.climatesRevision = result.revision;
+    } catch (error) {
+      this.showError(error?.message ?? "Could not delete the zone. Please try again.", zone.name);
+      return;
+    } finally {
+      this.applying = false;
+      this._syncQueued = false;
+      await this.syncBackendSchedules();
     }
 
     for (const entityId of zoneEntities) {
@@ -1807,16 +1821,16 @@ class NimbusClimateSchedulerPanel extends HTMLElement {
     }
 
     if (remaining.length) {
-      this.serverClimates = remaining;
       this.zonesSignature = null;
       this.syncZonesFromHass();
     } else {
       // Last zone removed: reopen the setup wizard instead of falling back
       // to auto-discovery of every climate entity.
-      this.serverClimates = null;
+      this.serverClimates = [];
       this.zones = [];
       this.showSetup = true;
       this.setupDraft = null;
+      this.setupRevision = undefined;
     }
     this.render();
   }

@@ -119,6 +119,11 @@ zone's name. Removing a member leaves that thermostat under manual control;
 keep at least one member selected. Available Heat/Cool modes and temperature
 ranges must support the existing plan.
 
+The setup wizard also preserves existing plans when renaming zones or adding
+thermostats. Existing zones need distinct names so their separate schedules are
+not accidentally merged. Concurrent changes to the zone list are rejected;
+reopen setup to start from the current selection.
+
 ## How it works
 
 - The panel saves each zone's schedule to Home Assistant storage over the
