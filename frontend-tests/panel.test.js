@@ -91,6 +91,19 @@ describe("Nimbus Climate Scheduler panel", () => {
     expect(schedule.draftWeek.Sun[0].temp).toBe(22);
   });
 
+  it("inserts at a chosen time, including a short interval or after midnight", () => {
+    const { panel, zone, schedule } = editingPanel();
+    panel.groupDays = false;
+    schedule.draftWeek.Mon = [0, 120, 240, 555, 810].map((minute) => ({ minute, temp: 19 }));
+    expect(panel.addSetpoint(zone, "Mon", 180)).toBe(true); // 08:00
+    expect(panel.addSetpoint(zone, "Mon", 1200)).toBe(true); // 01:00 the following day
+    expect(panel.addSetpoint(zone, "Mon", 180)).toBe(false);
+    expect(panel.addSetpoint(zone, "Mon", 0)).toBe(false);
+    expect(schedule.draftWeek.Mon.map((point) => point.minute)).toEqual([0, 120, 180, 240, 555, 810, 1200]);
+    expect(schedule.draftWeek.Tue).toHaveLength(1);
+    expect(schedule.savedWeek.Mon).toHaveLength(1);
+  });
+
   it("keeps failed saves as editable drafts", async () => {
     const { panel, zone, schedule } = editingPanel();
     panel.backendSyncComplete = true;

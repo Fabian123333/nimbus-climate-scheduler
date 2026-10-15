@@ -21,8 +21,9 @@ Assistant all those characteristics I love:
 - **Matching days share one row**. Edit weekdays, weekends, every day, or a custom
   selection together; switch off grouping to work on individual days.
 - **Add or remove intervals** as needed, with a separate temperature for each.
-  Drag a boundary, use the arrow keys (Shift for one-minute steps), or enter its
-  start time directly. The first interval always starts at 05:00.
+  Choose **New interval starts** to insert anywhere in the day. Drag an existing
+  boundary, use the arrow keys (Shift for one-minute steps), or enter its start
+  time directly. The first interval always starts at 05:00.
 
 Building this around a full-time job in another profession and two toddlers
 isn't easy — I've spent a lot of hours debugging. I'd genuinely love your

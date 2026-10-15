@@ -1083,18 +1083,26 @@ class NimbusClimateSchedulerPanel extends HTMLElement {
     this.markDirty(zone, mode);
   }
 
-  addSetpoint(zone, day) {
-    const points = this.getModeSchedule(zone).draftWeek[day];
+  suggestSetpointMinute(points) {
     const gaps = points.map((point, index) => (points[index + 1]?.minute ?? DAY_LENGTH_MINUTES) - point.minute);
     const index = gaps.indexOf(Math.max(...gaps));
-    if (gaps[index] < 2) return;
+    if (gaps[index] < 2) return null;
     const start = points[index].minute;
     const end = start + gaps[index];
-    const minute = clamp(snapMinute((start + end) / 2, SNAP_MINUTES), start + 1, end - 1);
+    return clamp(snapMinute((start + end) / 2, SNAP_MINUTES), start + 1, end - 1);
+  }
+
+  addSetpoint(zone, day, minute = null) {
+    const points = this.getModeSchedule(zone).draftWeek[day];
+    minute ??= this.suggestSetpointMinute(points);
+    if (!Number.isInteger(minute) || minute <= 0 || minute >= DAY_LENGTH_MINUTES
+      || points.some((point) => point.minute === minute)) return false;
+    const index = points.findLastIndex((point) => point.minute < minute);
     this.updateDraftDay(zone, day, (draft) => {
       draft.splice(index + 1, 0, { minute, temp: draft[index].temp });
     });
     this.render();
+    return true;
   }
 
   removeSetpoint(zone, day, index) {
@@ -1353,13 +1361,31 @@ class NimbusClimateSchedulerPanel extends HTMLElement {
       panel.append(editor);
     });
 
+    const addEditor = document.createElement("div");
+    addEditor.className = "setpoint-editor";
+    const addLabel = document.createElement("label");
+    addLabel.textContent = "New interval starts";
+    const addTime = document.createElement("input");
+    addTime.type = "time";
+    addTime.step = "60";
+    const suggested = this.suggestSetpointMinute(setpoints);
+    addTime.value = suggested === null ? "" : minutesToTime(scheduleMinuteToClockMinute(suggested));
+    addTime.disabled = suggested === null;
+    addTime.addEventListener("input", () => addTime.setCustomValidity(""));
+    addLabel.append(addTime);
     const add = document.createElement("button");
     add.type = "button";
     add.className = "add-interval";
     add.textContent = "Add interval";
     add.disabled = setpoints.length >= DAY_LENGTH_MINUTES;
-    add.addEventListener("click", () => this.addSetpoint(zone, day));
-    panel.append(add, this.renderDayActions(zone, day));
+    add.addEventListener("click", () => {
+      if (!addTime.value || !this.addSetpoint(zone, day, timeToScheduleMinute(addTime.value))) {
+        addTime.setCustomValidity("Choose a start time that is not already used by another interval.");
+        addTime.reportValidity();
+      }
+    });
+    addEditor.append(addLabel, add);
+    panel.append(addEditor, this.renderDayActions(zone, day));
   }
 
   renderDaySelection(zone, sourceDay) {
@@ -2460,4 +2486,8 @@ function clamp(value, min, max) {
   return Math.min(Math.max(value, min), max);
 }
 
-customElements.define("nimbus-climate-scheduler-panel", NimbusClimateSchedulerPanel);
+// A config-entry reload can register a new content-fingerprinted module URL in
+// an already open HA session. The browser upgrades the class on a page refresh.
+if (!customElements.get("nimbus-climate-scheduler-panel")) {
+  customElements.define("nimbus-climate-scheduler-panel", NimbusClimateSchedulerPanel);
+}
