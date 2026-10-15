@@ -347,6 +347,12 @@ select {
 .zone-name {
   width: 220px;
   display: grid;
+  border: 0;
+  padding: 8px 0;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
   gap: 3px;
   font-size: 16px;
   font-weight: 800;
@@ -488,8 +494,9 @@ select {
 }
 
 .day-button {
-  width: 88px;
-  height: 32px;
+  width: 100%;
+  min-height: 36px;
+  padding: 6px 8px;
   border: 1px solid rgba(255, 255, 255, 0.12);
   border-radius: 6px;
   color: var(--muted);
@@ -748,6 +755,7 @@ select {
 }
 
 .setpoint-editor label,
+.setpoint-editor > span,
 .copy-actions label {
   color: var(--muted);
   font-size: 10px;
@@ -1458,4 +1466,110 @@ select {
 .zone-status-value.warn {
   color: #ffb1a1;
   font-weight: 700;
+}
+
+.zone-status[hidden] {
+  display: none;
+}
+
+.week-toolbar,
+.day-selection {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.week-toolbar {
+  justify-content: space-between;
+  padding: 8px 0;
+}
+
+.day-selection {
+  grid-column: 1 / -1;
+  margin: 0 0 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 12px;
+}
+
+.day-selection legend {
+  padding: 0 6px;
+  color: var(--text);
+  font-weight: 700;
+}
+
+.day-selection p {
+  flex-basis: 100%;
+  margin: 0;
+  line-height: 1.5;
+}
+
+.day-selection label,
+.week-toolbar label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 32px;
+}
+
+.day-selection input,
+.week-toolbar input {
+  accent-color: var(--orange);
+}
+
+.day-selection button,
+.add-interval,
+.remove-interval {
+  min-height: 34px;
+  padding: 6px 10px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 6px;
+  background: var(--surface-2);
+  color: var(--text);
+  cursor: pointer;
+}
+
+.add-interval {
+  border-color: var(--orange-soft);
+}
+
+button:disabled,
+input:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+button:focus-visible,
+input:focus-visible {
+  outline: 2px solid var(--blue);
+  outline-offset: 3px;
+}
+
+.setpoint-editor {
+  padding: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 6px;
+}
+
+.setpoint-panel,
+:host([narrow]) .setpoint-panel {
+  grid-template-columns: repeat(auto-fit, minmax(min(185px, 100%), 1fr));
+}
+
+.copy-action-buttons {
+  flex-wrap: wrap;
+}
+
+.zone-entity {
+  overflow-wrap: anywhere;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation: none !important;
+    transition: none !important;
+  }
 }

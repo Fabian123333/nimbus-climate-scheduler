@@ -18,10 +18,11 @@ tried to make the Nimbus Climate Scheduler sidebar integration, to bring to Home
 Assistant all those characteristics I love:
 
 - You can handle **heat and cool modes separately**.
-- You can save an entire week's schedule by **copying a day** to working days /
-  all days / weekends.
-- There are **5 setpoints per day**, which you can drag however you like on the
-  timeline, and set a cool/heat temperature for each setpoint separately.
+- **Matching days share one row**. Edit weekdays, weekends, every day, or a custom
+  selection together; switch off grouping to work on individual days.
+- **Add or remove intervals** as needed, with a separate temperature for each.
+  Drag a boundary, use the arrow keys (Shift for one-minute steps), or enter its
+  start time directly. The first interval always starts at 05:00.
 
 Building this around a full-time job in another profession and two toddlers
 isn't easy — I've spent a lot of hours debugging. I'd genuinely love your
@@ -113,6 +114,9 @@ That's it — no YAML required.
   from the target, so it won't spam your devices.
 - The toggle on each zone enables or disables its schedule. Disabled means
   hands-off: your manual thermostat control is never touched.
+- New schedules start with one all-day interval. Existing schedules, including
+  separate weekday plans and unsaved drafts, are preserved. Grouping is only an
+  editing view; saving selected days leaves the other days unchanged.
 
 ## Notes
 

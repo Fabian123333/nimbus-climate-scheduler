@@ -37,13 +37,13 @@ const PANEL_HTML = `
 
   <template id="zoneTemplate">
     <article class="zone">
-      <button class="zone-header" type="button">
+      <div class="zone-header">
         <span class="thermo-icon" aria-hidden="true"></span>
-        <span class="zone-name"></span>
+        <button class="zone-name" type="button"></button>
         <span class="zone-temp"></span>
         <span class="zone-mode"></span>
         <span class="zone-switch-slot"></span>
-      </button>
+      </div>
       <div class="zone-body"></div>
     </article>
   </template>
@@ -74,6 +74,8 @@ class NimbusClimateSchedulerPanel extends HTMLElement {
     this.root = this.attachShadow({ mode: "open" });
     this.selectedZoneId = null;
     this.selectedDay = null;
+    this.groupDays = true;
+    this.daySelection = null;
     this.activeDrag = null;
     this.timeBubble = null;
     this.pendingNavigation = null;
@@ -534,11 +536,11 @@ class NimbusClimateSchedulerPanel extends HTMLElement {
     head.setAttribute("aria-hidden", "true");
 
     for (const [cls, text] of [
-      ["zch-icon", "Icon"],
-      ["zch-name", "Name"],
-      ["zch-temp", "Temp"],
-      ["zch-mode", "Mode"],
-      ["zch-manage", "Active · Manage"],
+      ["zch-icon", ""],
+      ["zch-name", "Zone"],
+      ["zch-temp", "Room temperature"],
+      ["zch-mode", "Thermostat mode"],
+      ["zch-manage", "Schedule"],
     ]) {
       const cell = document.createElement("span");
       cell.className = cls;
@@ -565,9 +567,8 @@ class NimbusClimateSchedulerPanel extends HTMLElement {
     ];
     const value = document.createElement("span");
     value.className = `zone-status-value${issues.length ? " warn" : ""}`;
-    value.textContent = issues.length
-      ? `⚠ ${issues.join(" · ")}`
-      : "ℹ️ All thermostats are properly supported";
+    value.textContent = issues.join("; ");
+    row.hidden = !issues.length;
 
     row.append(label, value);
     return row;
@@ -747,14 +748,8 @@ class NimbusClimateSchedulerPanel extends HTMLElement {
     const safeHeatTemp = Number.isFinite(baseTemp) && baseTemp > 0
       ? baseTemp
       : this.fromCelsius(20);
-    const setback = this.isFahrenheit() ? 4 : 2;
-    const floor = this.defaultMinTemp();
     const heatDay = normalizeSetpoints([
       { minute: 0, temp: safeHeatTemp },
-      { minute: timeToScheduleMinute("07:00"), temp: safeHeatTemp },
-      { minute: timeToScheduleMinute("09:00"), temp: Math.max(floor, safeHeatTemp - setback) },
-      { minute: timeToScheduleMinute("14:15"), temp: safeHeatTemp },
-      { minute: timeToScheduleMinute("18:30"), temp: Math.max(floor, safeHeatTemp - setback) },
     ]);
 
     return {
@@ -815,7 +810,8 @@ class NimbusClimateSchedulerPanel extends HTMLElement {
       node.classList.toggle("inactive", !zone.activeScheduleMode);
       node.querySelector(".zone-switch-slot").append(this.renderZoneSwitch(zone));
       node.querySelector(".zone-header").append(this.renderZoneActions(zone));
-      node.querySelector(".zone-header").addEventListener("click", () => {
+      node.querySelector(".zone-name").setAttribute("aria-expanded", String(zone.id === this.selectedZoneId));
+      node.querySelector(".zone-name").addEventListener("click", () => {
         this.requestNavigation(() => {
           this.selectedZoneId = this.selectedZoneId === zone.id ? null : zone.id;
         });
@@ -827,27 +823,103 @@ class NimbusClimateSchedulerPanel extends HTMLElement {
         body.append(this.renderZoneStatus(zone));
       }
       body.append(this.renderSchedulePreview(zone));
-      for (const day of DAYS) {
-        body.append(this.renderDay(zone, day));
+      body.append(this.renderWeekToolbar());
+      for (const days of this.getDayGroups(zone)) {
+        body.append(this.renderDay(zone, days));
       }
 
       this.zonesEl.append(node);
     }
   }
 
-  renderDay(zone, day) {
+  getDayGroups(zone) {
+    const schedule = this.getModeSchedule(zone);
+    const groups = [];
+    for (const day of DAYS) {
+      const group = this.groupDays && groups.find(([other]) => (
+        setpointsEqual(schedule.draftWeek[day], schedule.draftWeek[other])
+        && setpointsEqual(schedule.savedWeek[day], schedule.savedWeek[other])
+      ));
+      if (group) group.push(day);
+      else groups.push([day]);
+    }
+    return groups;
+  }
+
+  renderWeekToolbar() {
+    const toolbar = document.createElement("div");
+    toolbar.className = "week-toolbar";
+    const label = document.createElement("label");
+    const checkbox = document.createElement("input");
+    checkbox.type = "checkbox";
+    checkbox.checked = this.groupDays;
+    checkbox.addEventListener("change", () => {
+      this.groupDays = checkbox.checked;
+      this.daySelection = null;
+      this.render();
+    });
+    label.append(checkbox, "Group matching days");
+    const hint = document.createElement("span");
+    hint.textContent = "Each schedule day runs from 05:00 to 05:00 the following day.";
+    toolbar.append(label, hint);
+    return toolbar;
+  }
+
+  daysForEdit(zone, day, mode = zone.scheduleMode) {
+    const selection = this.daySelection;
+    if (selection?.zoneId === zone.id && selection.mode === mode && selection.sourceDay === day) {
+      return selection.days;
+    }
+    return this.getDayGroups(zone).find((days) => days.includes(day)) ?? [day];
+  }
+
+  updateDraftDay(zone, day, update, mode = zone.scheduleMode) {
+    const schedule = this.getModeSchedule(zone, mode);
+    const days = [...this.daysForEdit(zone, day, mode)];
+    const points = cloneSetpoints(schedule.draftWeek[day]);
+    update(points);
+    for (const target of days) schedule.draftWeek[target] = cloneSetpoints(points);
+    this.markDirty(zone, mode);
+  }
+
+  addSetpoint(zone, day) {
+    const points = this.getModeSchedule(zone).draftWeek[day];
+    const gaps = points.map((point, index) => (points[index + 1]?.minute ?? DAY_LENGTH_MINUTES) - point.minute);
+    const index = gaps.indexOf(Math.max(...gaps));
+    if (gaps[index] < 2) return;
+    const start = points[index].minute;
+    const end = start + gaps[index];
+    const minute = clamp(snapMinute((start + end) / 2, SNAP_MINUTES), start + 1, end - 1);
+    this.updateDraftDay(zone, day, (draft) => {
+      draft.splice(index + 1, 0, { minute, temp: draft[index].temp });
+    });
+    this.render();
+  }
+
+  removeSetpoint(zone, day, index) {
+    // The first interval covers the start of the day; keep at least that one.
+    if (index === 0) return;
+    this.updateDraftDay(zone, day, (points) => points.splice(index, 1));
+    this.render();
+  }
+
+  renderDay(zone, days) {
+    const day = days.includes(this.selectedDay) ? this.selectedDay : days[0];
     const row = this.dayTemplate.content.firstElementChild.cloneNode(true);
     const isActive = zone.id === this.selectedZoneId && day === this.selectedDay;
     const schedule = this.getModeSchedule(zone);
     const setpoints = schedule.draftWeek[day];
     const savedSetpoints = schedule.savedWeek[day];
 
+    row.dataset.day = day;
     row.classList.toggle("active", isActive);
-    row.querySelector(".day-button").textContent = day;
+    row.querySelector(".day-button").textContent = dayGroupLabel(days);
+    row.querySelector(".day-button").setAttribute("aria-expanded", String(isActive));
     const selectDay = () => {
       this.requestNavigation(() => {
         this.selectedZoneId = zone.id;
         this.selectedDay = isActive ? null : day;
+        this.daySelection = null;
       });
     };
     row.querySelector(".day-button").addEventListener("click", selectDay);
@@ -855,11 +927,11 @@ class NimbusClimateSchedulerPanel extends HTMLElement {
     const chevron = document.createElement("button");
     chevron.type = "button";
     chevron.className = "day-chevron";
-    chevron.setAttribute("aria-label", `${day} setpoints`);
+    chevron.setAttribute("aria-label", `Edit ${dayGroupLabel(days)}`);
     chevron.setAttribute("aria-expanded", String(isActive));
     chevron.addEventListener("click", selectDay);
     row.append(chevron);
-    row.querySelector(".day-current").textContent = `Current ${temperatureLabel(zone.currentTemp)}`;
+    row.querySelector(".day-current").textContent = `${setpoints.length} ${setpoints.length === 1 ? "interval" : "intervals"}`;
 
     this.renderTicks(row.querySelector(".ticks"));
     this.renderSegments(row.querySelector(".segments"), setpoints, zone.scheduleMode);
@@ -974,6 +1046,17 @@ class NimbusClimateSchedulerPanel extends HTMLElement {
       handle.addEventListener("pointerenter", (event) => this.showBubble(event, point.minute));
       handle.addEventListener("pointermove", (event) => this.showBubble(event, point.minute));
       handle.addEventListener("pointerleave", () => this.hideBubble());
+      handle.addEventListener("keydown", (event) => {
+        if (!["ArrowLeft", "ArrowRight"].includes(event.key)) return;
+        event.preventDefault();
+        const delta = (event.key === "ArrowLeft" ? -1 : 1) * (event.shiftKey ? 1 : SNAP_MINUTES);
+        this.updateDraftDay(zone, day, (points) => {
+          points[index].minute = clamp(points[index].minute + delta, points[index - 1].minute + 1,
+            (points[index + 1]?.minute ?? DAY_LENGTH_MINUTES) - 1);
+        });
+        this.render();
+        this.root.querySelector(`[data-day="${day}"] .handle[data-index="${index + 1}"]`)?.focus();
+      });
       handlesEl.append(handle);
     });
   }
@@ -982,13 +1065,35 @@ class NimbusClimateSchedulerPanel extends HTMLElement {
     panel.replaceChildren();
     if (!isActive) return;
 
+    panel.append(this.renderDaySelection(zone, day));
+
     setpoints.forEach((point, index) => {
       const editor = document.createElement("div");
       editor.className = "setpoint-editor";
 
-      const label = document.createElement("label");
+      const label = document.createElement("span");
       label.dataset.setpointLabel = String(index);
-      label.textContent = `Setpoint ${index + 1} · ${formatSetpointRange(setpoints, index)}`;
+      label.textContent = formatSetpointRange(setpoints, index);
+
+      const time = document.createElement("input");
+      time.type = "time";
+      time.step = "60";
+      time.value = minutesToTime(scheduleMinuteToClockMinute(point.minute));
+      time.disabled = index === 0;
+      time.setAttribute("aria-label", `Interval ${index + 1} start time`);
+      if (index === 0) time.title = "The first interval starts at 05:00.";
+      time.addEventListener("change", () => {
+        const minute = timeToScheduleMinute(time.value);
+        if (!time.value || !Number.isFinite(minute) || minute <= setpoints[index - 1].minute
+          || minute >= (setpoints[index + 1]?.minute ?? DAY_LENGTH_MINUTES)) {
+          time.setCustomValidity("Choose a time between the previous and next interval, within the 05:00–05:00 schedule day.");
+          time.reportValidity();
+          return;
+        }
+        time.setCustomValidity("");
+        this.updateDraftDay(zone, day, (points) => { points[index].minute = minute; });
+        this.render();
+      });
 
       const step = zone.tempStep ?? 0.5;
       const minTemp = zone.minTemp ?? this.defaultMinTemp();
@@ -996,8 +1101,9 @@ class NimbusClimateSchedulerPanel extends HTMLElement {
       const applyTemp = (next) => {
         if (!Number.isFinite(next)) return;
         const snapped = Math.round(next / step) * step;
-        point.temp = Math.round(clamp(snapped, minTemp, maxTemp) * 10) / 10;
-        this.markDirty(zone, zone.scheduleMode);
+        this.updateDraftDay(zone, day, (points) => {
+          points[index].temp = Math.round(clamp(snapped, minTemp, maxTemp) * 10) / 10;
+        });
         this.render();
       };
 
@@ -1021,7 +1127,10 @@ class NimbusClimateSchedulerPanel extends HTMLElement {
       input.max = String(maxTemp);
       input.step = String(step);
       input.value = String(point.temp);
-      input.addEventListener("change", () => applyTemp(Number(input.value)));
+      input.setAttribute("aria-label", `Interval ${index + 1} temperature (${this.temperatureUnit})`);
+      input.addEventListener("change", () => {
+        if (input.value !== "") applyTemp(Number(input.value));
+      });
 
       const plus = document.createElement("button");
       plus.type = "button";
@@ -1031,62 +1140,84 @@ class NimbusClimateSchedulerPanel extends HTMLElement {
       plus.addEventListener("click", () => applyTemp(Number(point.temp) + step));
 
       stepper.append(icon, minus, input, plus);
-      editor.append(label, stepper);
+      const remove = document.createElement("button");
+      remove.type = "button";
+      remove.className = "remove-interval";
+      remove.textContent = "Remove";
+      remove.disabled = index === 0;
+      remove.setAttribute("aria-label", `Remove interval ${index + 1}`);
+      remove.title = index === 0 ? "The first interval covers the start of the day." : "Extend the previous interval to replace this one.";
+      remove.addEventListener("click", () => this.removeSetpoint(zone, day, index));
+      editor.append(label, time, stepper, remove);
       panel.append(editor);
     });
 
-    panel.append(this.renderCopyActions(zone, day, setpoints, savedSetpoints));
+    const add = document.createElement("button");
+    add.type = "button";
+    add.className = "add-interval";
+    add.textContent = "Add interval";
+    add.disabled = setpoints.length >= DAY_LENGTH_MINUTES;
+    add.addEventListener("click", () => this.addSetpoint(zone, day));
+    panel.append(add, this.renderDayActions(zone, day));
   }
 
-  renderCopyActions(zone, sourceDay, setpoints, savedSetpoints) {
-    const wrap = document.createElement("div");
-    wrap.className = "copy-actions";
-
-    const targets = DAYS.filter((day) => day !== sourceDay);
-    for (const day of targets) {
+  renderDaySelection(zone, sourceDay) {
+    const selection = {
+      zoneId: zone.id, mode: zone.scheduleMode, sourceDay,
+      days: [...this.daysForEdit(zone, sourceDay)],
+    };
+    this.daySelection = selection;
+    const wrap = document.createElement("fieldset");
+    wrap.className = "day-selection";
+    const legend = document.createElement("legend");
+    legend.textContent = "Edit days together";
+    wrap.append(legend);
+    for (const day of DAYS) {
       const label = document.createElement("label");
       const checkbox = document.createElement("input");
       checkbox.type = "checkbox";
-      checkbox.value = day;
+      checkbox.checked = selection.days.includes(day);
+      checkbox.disabled = day === sourceDay;
+      checkbox.addEventListener("change", () => {
+        selection.days = DAYS.filter((target) => target === day ? checkbox.checked : selection.days.includes(target));
+        this.render();
+      });
       label.append(checkbox, day);
       wrap.append(label);
     }
+    for (const [label, days] of [["Every day", DAYS], ["Weekdays", DAYS.slice(0, 5)], ["Weekend", DAYS.slice(5)], ["Only this day", [sourceDay]]]) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.textContent = label;
+      button.addEventListener("click", () => {
+        selection.days = DAYS.filter((day) => day === sourceDay || days.includes(day));
+        this.render();
+      });
+      wrap.append(button);
+    }
+    const hint = document.createElement("p");
+    hint.textContent = "Edits use this plan for all selected days. Save to apply them to your thermostats.";
+    wrap.append(hint);
+    return wrap;
+  }
 
-    const workingDays = document.createElement("label");
-    const workingCheckbox = document.createElement("input");
-    workingCheckbox.type = "checkbox";
-    workingDays.append(workingCheckbox, "Working days");
-    wrap.append(workingDays);
-
-    const week = document.createElement("label");
-    const weekCheckbox = document.createElement("input");
-    weekCheckbox.type = "checkbox";
-    week.append(weekCheckbox, "Week");
-    wrap.append(week);
-
-    workingCheckbox.addEventListener("change", () => {
-      weekCheckbox.checked = false;
-      for (const checkbox of wrap.querySelectorAll("input[value]")) {
-        checkbox.checked = workingCheckbox.checked && ["Mon", "Tue", "Wed", "Thu", "Fri"].includes(checkbox.value);
-      }
-    });
-
-    weekCheckbox.addEventListener("change", () => {
-      workingCheckbox.checked = false;
-      for (const checkbox of wrap.querySelectorAll("input[value]")) {
-        checkbox.checked = weekCheckbox.checked;
-      }
-    });
+  renderDayActions(zone, sourceDay) {
+    const wrap = document.createElement("div");
+    wrap.className = "copy-actions";
+    const days = this.daysForEdit(zone, sourceDay);
+    const schedule = this.getModeSchedule(zone);
+    const dirty = days.some((day) => !setpointsEqual(schedule.draftWeek[day], schedule.savedWeek[day]));
 
     const actionGroup = document.createElement("div");
     actionGroup.className = "copy-action-buttons";
 
     const resetDayButton = document.createElement("button");
     resetDayButton.type = "button";
-    resetDayButton.textContent = "Reset";
-    resetDayButton.disabled = setpointsEqual(setpoints, savedSetpoints);
+    resetDayButton.textContent = "Reset selected days";
+    resetDayButton.disabled = !dirty;
     resetDayButton.addEventListener("click", () => {
-      this.resetZoneDay(zone, zone.scheduleMode, sourceDay);
+      for (const day of days) schedule.draftWeek[day] = cloneSetpoints(schedule.savedWeek[day]);
+      this.markDirty(zone);
       this.render();
     });
     actionGroup.append(resetDayButton);
@@ -1094,24 +1225,20 @@ class NimbusClimateSchedulerPanel extends HTMLElement {
     const saveDayButton = document.createElement("button");
     saveDayButton.type = "button";
     saveDayButton.className = "save-day-button";
-    saveDayButton.textContent = "Save";
-    saveDayButton.disabled = setpointsEqual(setpoints, savedSetpoints);
+    saveDayButton.textContent = "Save selected days";
+    saveDayButton.disabled = !dirty;
     saveDayButton.addEventListener("click", () => {
-      this.saveZoneDay(zone, zone.scheduleMode, sourceDay);
+      this.saveZoneDays(zone, zone.scheduleMode, days);
       this.render();
     });
     actionGroup.append(saveDayButton);
 
     const copyButton = document.createElement("button");
     copyButton.type = "button";
-    copyButton.textContent = "Copy";
+    copyButton.textContent = "Use this plan for selected days";
+    copyButton.disabled = days.every((day) => setpointsEqual(schedule.draftWeek[day], schedule.draftWeek[sourceDay]));
     copyButton.addEventListener("click", () => {
-      const selectedDays = [...wrap.querySelectorAll("input[value]:checked")].map((input) => input.value);
-      const schedule = this.getModeSchedule(zone);
-      for (const day of selectedDays) {
-        schedule.draftWeek[day] = cloneSetpoints(schedule.draftWeek[sourceDay]);
-      }
-      this.markDirty(zone, zone.scheduleMode);
+      this.updateDraftDay(zone, sourceDay, () => {});
       this.render();
     });
     actionGroup.append(copyButton);
@@ -1128,6 +1255,7 @@ class NimbusClimateSchedulerPanel extends HTMLElement {
       day,
       index,
       mode: this.findZone(zoneId)?.scheduleMode ?? "heat",
+      days: [...this.daysForEdit(this.findZone(zoneId), day)],
       timeline: event.currentTarget.closest(".timeline"),
       handle: event.currentTarget,
     };
@@ -1142,9 +1270,9 @@ class NimbusClimateSchedulerPanel extends HTMLElement {
     const rect = this.activeDrag.timeline.getBoundingClientRect();
     const rawPercent = clamp((event.clientX - rect.left) / rect.width, 0, 1);
     const snappedMinute = snapMinute(rawPercent * DAY_LENGTH_MINUTES, SNAP_MINUTES);
-    const previous = points[this.activeDrag.index - 1].minute + SNAP_MINUTES;
+    const previous = points[this.activeDrag.index - 1].minute + 1;
     const nextPoint = points[this.activeDrag.index + 1];
-    const next = nextPoint ? nextPoint.minute - SNAP_MINUTES : DAY_LENGTH_MINUTES - SNAP_MINUTES;
+    const next = nextPoint ? nextPoint.minute - 1 : DAY_LENGTH_MINUTES - 1;
 
     points[this.activeDrag.index].minute = clamp(snappedMinute, previous, next);
     this.activeDrag.handle.style.left = `${minuteToPercent(points[this.activeDrag.index].minute)}%`;
@@ -1159,6 +1287,9 @@ class NimbusClimateSchedulerPanel extends HTMLElement {
     const zone = this.findZone(this.activeDrag.zoneId);
     const schedule = this.getModeSchedule(zone, this.activeDrag.mode);
     schedule.draftWeek[this.activeDrag.day] = normalizeSetpoints(schedule.draftWeek[this.activeDrag.day]);
+    for (const day of this.activeDrag.days) {
+      schedule.draftWeek[day] = cloneSetpoints(schedule.draftWeek[this.activeDrag.day]);
+    }
     this.markDirty(zone, this.activeDrag.mode);
     this.activeDrag = null;
     this.hideBubble();
@@ -1171,7 +1302,7 @@ class NimbusClimateSchedulerPanel extends HTMLElement {
 
       const label = row.querySelector(`[data-setpoint-label="${index}"]`);
       if (label) {
-        label.textContent = `Setpoint ${index + 1} · ${formatSetpointRange(setpoints, index)}`;
+        label.textContent = formatSetpointRange(setpoints, index);
       }
     }
   }
@@ -1630,8 +1761,12 @@ class NimbusClimateSchedulerPanel extends HTMLElement {
   }
 
   saveZoneDay(zone, mode, day) {
+    this.saveZoneDays(zone, mode, [day]);
+  }
+
+  saveZoneDays(zone, mode, days) {
     const schedule = this.getModeSchedule(zone, mode);
-    schedule.savedWeek[day] = cloneSetpoints(schedule.draftWeek[day]);
+    for (const day of days) schedule.savedWeek[day] = cloneSetpoints(schedule.draftWeek[day]);
     schedule.dirty = !weeksEqual(schedule.savedWeek, schedule.draftWeek);
     this.persistZone(zone);
     this.saveAndApply(zone);
@@ -2136,6 +2271,13 @@ function cloneSetpoints(setpoints) {
 
 function setpointsEqual(left, right) {
   return JSON.stringify(left) === JSON.stringify(right);
+}
+
+function dayGroupLabel(days) {
+  if (days.length === 7) return "Every day";
+  if (days.join() === DAYS.slice(0, 5).join()) return "Weekdays";
+  if (days.join() === DAYS.slice(5).join()) return "Weekend";
+  return days.join(", ");
 }
 
 function weeksEqual(left, right) {
