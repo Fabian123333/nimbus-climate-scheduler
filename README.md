@@ -120,6 +120,21 @@ That's it — no YAML required.
   separate weekday plans and unsaved drafts, are preserved. Grouping is only an
   editing view; saving selected days leaves the other days unchanged.
 
+## Temperature colors
+
+Open the panel's **Settings** tab to change the Cold, Warm and Hot thresholds
+for heating and cooling. The intermediate Comfort band fills the gap between
+Cold and Warm. A legend shows the exact ranges next to each schedule.
+
+These global settings apply to every zone and the dashboard card; they only
+change colors, never thermostat targets. Values are displayed in your HA unit
+system and stored in Celsius so changing units does not change their meaning.
+Existing installations keep the original colors until you save new thresholds.
+
+The six thresholds are also available as **Number** configuration entities.
+Use `number.set_value` in an automation (in the entity's displayed unit). Each
+update must keep `Cold < Warm < Hot`; invalid updates leave the settings intact.
+
 ## Automations
 
 Each zone has a **Schedule** switch and a **Schedule mode** select, under

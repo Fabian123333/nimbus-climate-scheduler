@@ -41,7 +41,7 @@ from .store import NimbusClimateSchedulerStore
 from .websocket import async_setup_websocket_api
 
 _LOGGER = logging.getLogger(__name__)
-PLATFORMS = [Platform.SWITCH, Platform.SELECT]
+PLATFORMS = [Platform.SWITCH, Platform.SELECT, Platform.NUMBER]
 
 CLIMATE_SCHEMA = vol.Schema({
     vol.Required(CONF_ENTITY): cv.entity_id,

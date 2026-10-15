@@ -12,6 +12,7 @@ from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.helpers.storage import Store
 
 from .const import SIGNAL_UPDATED, STORAGE_KEY, STORAGE_VERSION
+from .settings import DEFAULT_COLOR_THRESHOLDS, merge_settings
 
 
 class NimbusClimateSchedulerStore:
@@ -116,5 +117,18 @@ class NimbusClimateSchedulerStore:
     async def async_set_zone(self, entity_id: str, zone_data: dict[str, Any]) -> None:
         await self.async_set_zones({entity_id: zone_data})
 
+    def get_settings(self) -> dict:
+        return deepcopy(self.data.get("settings", {"color_thresholds": DEFAULT_COLOR_THRESHOLDS}))
+
+    async def async_set_settings(self, update: dict, expected_revision: int | None = None) -> None:
+        async with self._lock:
+            revision = self.data.get("settings_revision", 0)
+            if expected_revision is not None and revision != expected_revision:
+                raise HomeAssistantError("Color settings changed elsewhere. Reopen Settings before saving.")
+            data = deepcopy(self.data)
+            data["settings"] = merge_settings(self.get_settings(), update)
+            data["settings_revision"] = revision + 1
+            await self._async_commit(data)
+
     def as_dict(self) -> dict[str, Any]:
-        return deepcopy(self.data)
+        return {**deepcopy(self.data), "settings": self.get_settings(), "settings_revision": self.data.get("settings_revision", 0)}

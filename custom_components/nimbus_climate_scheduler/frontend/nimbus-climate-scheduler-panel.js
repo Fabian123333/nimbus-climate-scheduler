@@ -6,6 +6,11 @@ const SVG_NS = "http://www.w3.org/2000/svg";
 const STORAGE_PREFIX = "nimbus-climate-scheduler:v1";
 
 const DAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+// Celsius fallbacks also allow the panel to display pre-settings installations.
+const DEFAULT_COLOR_THRESHOLDS = {
+  heat: { cold: 18, warm: 20.5, hot: 22 },
+  cool: { cold: 24, warm: 25.5, hot: 27 },
+};
 const STYLE_URL = new URL(`./styles.css${new URL(import.meta.url).search}`, import.meta.url).href;
 
 const PANEL_HTML = `
@@ -29,10 +34,15 @@ const PANEL_HTML = `
       </div>
     </header>
 
+    <nav class="panel-tabs" role="tablist" aria-label="Nimbus Climate Scheduler">
+      <button id="schedulesTab" role="tab" type="button" aria-controls="zones" aria-selected="true">Schedules</button>
+      <button id="settingsTab" role="tab" type="button" aria-controls="settings" aria-selected="false" tabindex="-1">Settings</button>
+    </nav>
     <section id="guardBar" class="guard-bar" hidden aria-live="polite"></section>
     <section id="setupWizard" class="setup-wizard" hidden></section>
     <section id="applyResult" class="apply-result" hidden aria-live="polite"></section>
-    <section id="zones" class="zones" aria-label="Thermostat zones"></section>
+    <section id="zones" class="zones" role="tabpanel" aria-labelledby="schedulesTab"></section>
+    <section id="settings" class="settings" role="tabpanel" aria-labelledby="settingsTab" hidden></section>
   </main>
 
   <template id="zoneTemplate">
@@ -81,6 +91,10 @@ class NimbusClimateSchedulerPanel extends HTMLElement {
     this.pendingNavigation = null;
     this.renderPending = false;
     this.temperatureUnit = "°C";
+    this.activeTab = "schedules";
+    this.colorThresholds = structuredClone(DEFAULT_COLOR_THRESHOLDS);
+    this.settingsRevision = 0;
+    this.settingsDraft = null;
     this.serverClimates = null;
     this.showSetup = false;
     this.setupDraft = null;
@@ -175,6 +189,7 @@ class NimbusClimateSchedulerPanel extends HTMLElement {
   cacheElements() {
     this.scheduleView = this.root.querySelector("#scheduleView");
     this.zonesEl = this.root.querySelector("#zones");
+    this.settingsEl = this.root.querySelector("#settings");
     this.guardBar = this.root.querySelector("#guardBar");
     this.applyResult = this.root.querySelector("#applyResult");
     this.setupWizard = this.root.querySelector("#setupWizard");
@@ -186,6 +201,24 @@ class NimbusClimateSchedulerPanel extends HTMLElement {
   }
 
   setupEvents() {
+    const tabs = [...this.root.querySelectorAll('[role="tab"]')];
+    tabs.forEach((tab, index) => {
+      tab.addEventListener("click", () => this.requestNavigation(() => {
+        this.activeTab = index === 0 ? "schedules" : "settings";
+        if (this.activeTab === "settings") {
+          this.settingsDraft = structuredClone(this.colorThresholds);
+          this.settingsBaseRevision = this.settingsRevision;
+          this.settingsMessage = null;
+        }
+      }));
+      tab.addEventListener("keydown", (event) => {
+        if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+        event.preventDefault();
+        const next = event.key === "Home" ? tabs[0] : event.key === "End" ? tabs[1] : tabs[1 - index];
+        next.focus();
+        next.click();
+      });
+    });
     this.setupButton.addEventListener("click", () => this.openSetup());
     this.menuButton.addEventListener("click", () => {
       this.dispatchEvent(new CustomEvent("hass-toggle-menu", { bubbles: true, composed: true }));
@@ -317,6 +350,8 @@ class NimbusClimateSchedulerPanel extends HTMLElement {
     this._syncing = true;
     try {
       const result = await this._hass.callWS({ type: "nimbus_climate_scheduler/get_zones" });
+      this.colorThresholds = result?.settings?.color_thresholds ?? structuredClone(DEFAULT_COLOR_THRESHOLDS);
+      this.settingsRevision = result?.settings_revision ?? 0;
       const zones = result?.zones ?? {};
       this.serverClimates = Array.isArray(result?.climates)
         ? result.climates
@@ -393,6 +428,7 @@ class NimbusClimateSchedulerPanel extends HTMLElement {
   }
 
   openSetup() {
+    this.activeTab = "schedules";
     this.setupDraft = null;
     this.showSetup = true;
     this.render();
@@ -845,10 +881,17 @@ class NimbusClimateSchedulerPanel extends HTMLElement {
     this.renderGuard();
     this.renderApplyResult();
     this.renderSetup();
+    this.renderSettings();
+    for (const tab of this.root.querySelectorAll('[role="tab"]')) {
+      const selected = tab.id === `${this.activeTab}Tab`;
+      tab.setAttribute("aria-selected", String(selected));
+      tab.tabIndex = selected ? 0 : -1;
+    }
+    this.setupWizard.hidden = !this.showSetup || this.activeTab !== "schedules";
 
     this.zonesEl.replaceChildren();
-    this.zonesEl.hidden = this.showSetup;
-    if (this.showSetup) return;
+    this.zonesEl.hidden = this.showSetup || this.activeTab !== "schedules";
+    if (this.zonesEl.hidden) return;
 
     this.zonesEl.append(this.renderZoneColumnHeaders());
 
@@ -880,6 +923,7 @@ class NimbusClimateSchedulerPanel extends HTMLElement {
         body.append(this.renderZoneStatus(zone));
       }
       body.append(this.renderSchedulePreview(zone));
+      body.append(this.renderColorLegend(zone.scheduleMode));
       body.append(this.renderWeekToolbar());
       for (const days of this.getDayGroups(zone)) {
         body.append(this.renderDay(zone, days));
@@ -901,6 +945,120 @@ class NimbusClimateSchedulerPanel extends HTMLElement {
       else groups.push([day]);
     }
     return groups;
+  }
+
+  renderSettings() {
+    this.settingsEl.hidden = this.activeTab !== "settings";
+    if (this.settingsEl.hidden) return;
+    this.settingsEl.replaceChildren();
+    this.settingsDraft ??= structuredClone(this.colorThresholds);
+    const title = document.createElement("h2");
+    title.textContent = "Temperature colors";
+    const hint = document.createElement("p");
+    hint.textContent = `Choose the color thresholds for all zones and dashboard cards (${this.temperatureUnit}). These affect display only, not thermostat targets. Cold must be below Warm, and Warm below Hot.`;
+    const form = document.createElement("form");
+    form.className = "settings-form";
+    for (const mode of ["heat", "cool"]) {
+      const fieldset = document.createElement("fieldset");
+      const legend = document.createElement("legend");
+      legend.textContent = modeLabel(mode);
+      fieldset.append(legend);
+      for (const [band, description] of [["cold", "Cold at or below"], ["warm", "Warm from"], ["hot", "Hot from"]]) {
+        const label = document.createElement("label");
+        const swatch = document.createElement("span");
+        swatch.className = `color-swatch color-${band}`;
+        swatch.setAttribute("aria-hidden", "true");
+        label.append(swatch, `${description} (${this.temperatureUnit})`);
+        const input = document.createElement("input");
+        input.type = "number";
+        input.required = true;
+        input.step = "any";
+        input.min = String(this.fromCelsius(-100));
+        input.max = String(this.fromCelsius(100));
+        input.value = String(formatTemperature(this.fromCelsius(this.settingsDraft[mode][band])));
+        input.disabled = this.settingsSaving;
+        input.addEventListener("input", () => {
+          this.settingsDraft[mode][band] = input.value === "" ? NaN : this.toCelsius(Number(input.value));
+        });
+        label.append(input);
+        fieldset.append(label);
+      }
+      form.append(fieldset);
+    }
+    const actions = document.createElement("div");
+    actions.className = "settings-actions";
+    const reset = document.createElement("button");
+    reset.type = "button";
+    reset.textContent = "Restore default colors";
+    reset.disabled = this.settingsSaving;
+    reset.addEventListener("click", () => {
+      this.settingsDraft = structuredClone(DEFAULT_COLOR_THRESHOLDS);
+      this.settingsMessage = "Defaults restored in this form. Save to apply.";
+      this.renderSettings();
+    });
+    const save = document.createElement("button");
+    save.type = "submit";
+    save.textContent = this.settingsSaving ? "Saving…" : "Save settings";
+    save.disabled = this.settingsSaving || !this.backendSyncComplete;
+    actions.append(reset, save);
+    form.append(actions);
+    form.addEventListener("submit", (event) => {
+      event.preventDefault();
+      this.saveSettings();
+    });
+    const message = document.createElement("p");
+    message.setAttribute("role", "status");
+    message.textContent = this.settingsMessage ?? "Settings are also available as Number entities in Home Assistant.";
+    this.settingsEl.append(title, hint, form, message);
+  }
+
+  async saveSettings() {
+    if (this.settingsSaving) return;
+    if (Object.values(this.settingsDraft).some(({ cold, warm, hot }) => (
+      ![cold, warm, hot].every(Number.isFinite) || !(cold < warm && warm < hot)
+    ))) {
+      this.settingsMessage = "Enter valid temperatures in ascending order: Cold < Warm < Hot.";
+      this.renderSettings();
+      return;
+    }
+    this.settingsSaving = true;
+    this.renderSettings();
+    try {
+      const result = await this._hass.callWS({
+        type: "nimbus_climate_scheduler/set_settings",
+        settings: { color_thresholds: structuredClone(this.settingsDraft) },
+        expected_revision: this.settingsBaseRevision,
+      });
+      this.colorThresholds = result.settings.color_thresholds;
+      this.settingsRevision = this.settingsBaseRevision = result.revision;
+      this.settingsMessage = "Color settings saved.";
+    } catch (error) {
+      this.settingsMessage = error?.message ?? "Could not save color settings.";
+    } finally {
+      this.settingsSaving = false;
+      this.renderSettings();
+    }
+  }
+
+  renderColorLegend(mode) {
+    const { cold, warm, hot } = this.colorThresholds[mode];
+    const format = (value) => `${formatTemperature(this.fromCelsius(value))}${this.temperatureUnit}`;
+    const legend = document.createElement("div");
+    legend.className = "color-legend";
+    for (const [band, text] of [
+      ["cold", `Cold ≤ ${format(cold)}`],
+      ["comfort", `Comfort > ${format(cold)} to < ${format(warm)}`],
+      ["warm", `Warm ≥ ${format(warm)} to < ${format(hot)}`],
+      ["hot", `Hot ≥ ${format(hot)}`],
+    ]) {
+      const label = document.createElement("span");
+      const swatch = document.createElement("span");
+      swatch.className = `color-swatch color-${band}`;
+      swatch.setAttribute("aria-hidden", "true");
+      label.append(swatch, text);
+      legend.append(label);
+    }
+    return legend;
   }
 
   renderWeekToolbar() {
@@ -1878,35 +2036,16 @@ class NimbusClimateSchedulerPanel extends HTMLElement {
 
   tempClass(temp, mode = "heat") {
     const celsius = this.toCelsius(temp);
-    if (mode === "cool") {
-      if (celsius <= 24) return "cool";
-      if (celsius >= 27) return "hot";
-      if (celsius >= 25.5) return "warm";
-      return "";
-    }
-
-    if (celsius <= 18) return "cool";
-    if (celsius >= 22) return "hot";
-    if (celsius >= 20.5) return "warm";
+    const { cold, warm, hot } = this.colorThresholds[mode ?? "heat"];
+    // Tolerate conversion roundoff at exact Fahrenheit/Celsius boundaries.
+    if (celsius <= cold + 1e-8) return "cool";
+    if (celsius >= hot - 1e-8) return "hot";
+    if (celsius >= warm - 1e-8) return "warm";
     return "";
   }
 
   colorForTemp(temp, mode = "heat") {
-    mode = mode ?? "heat";
-    // Band thresholds are defined in °C; convert the displayed value first
-    // so Fahrenheit installs get the same color semantics.
-    const celsius = this.toCelsius(temp);
-    if (mode === "cool") {
-      if (celsius <= 24) return "#52dce9";
-      if (celsius >= 27) return "#f3d24e";
-      if (celsius >= 25.5) return "#9afb3b";
-      return "#6df338";
-    }
-
-    if (celsius <= 18) return "#52dce9";
-    if (celsius >= 22) return "#f3d24e";
-    if (celsius >= 20.5) return "#9afb3b";
-    return "#6df338";
+    return { cool: "#52dce9", hot: "#f3d24e", warm: "#9afb3b", "": "#6df338" }[this.tempClass(temp, mode)];
   }
 
   getSelectedScheduleMode() {

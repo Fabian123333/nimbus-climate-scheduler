@@ -25,6 +25,12 @@
   const DAY_START_MINUTES = 5 * 60;
   const DAY_LENGTH_MINUTES = 24 * 60;
   const DAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+  // Keep the /local card self-contained so it can load before the integration's
+  // static path. These fallbacks match pre-settings installations of the panel.
+  const DEFAULT_COLOR_THRESHOLDS = {
+    heat: { cold: 18, warm: 20.5, hot: 22 },
+    cool: { cold: 24, warm: 25.5, hot: 27 },
+  };
   const REFRESH_SCHEDULE_MS = 5 * 60 * 1000;
   const TICK_MS = 30 * 1000;
   const INITIAL_RETRY_MS = 2 * 1000;
@@ -250,15 +256,10 @@
     // Same discrete bands as the scheduler panel — keeps card and panel in sync.
     _colorForTemp(temp, mode) {
       const c = this._toCelsius(temp);
-      if (mode === "cool") {
-        if (c <= 24) return "#52dce9";
-        if (c >= 27) return "#f3d24e";
-        if (c >= 25.5) return "#9afb3b";
-        return "#6df338";
-      }
-      if (c <= 18) return "#52dce9";
-      if (c >= 22) return "#f3d24e";
-      if (c >= 20.5) return "#9afb3b";
+      const { cold, warm, hot } = (this._colorThresholds ?? DEFAULT_COLOR_THRESHOLDS)[mode ?? "heat"];
+      if (c <= cold + 1e-8) return "#52dce9";
+      if (c >= hot - 1e-8) return "#f3d24e";
+      if (c >= warm - 1e-8) return "#9afb3b";
       return "#6df338";
     }
     _haptic(style = "selection") {
@@ -358,6 +359,7 @@
       try {
         const result = await this._hass.callWS({ type: WS_GET_ZONES });
         this._zones = result?.zones ?? {};
+        this._colorThresholds = result?.settings?.color_thresholds ?? DEFAULT_COLOR_THRESHOLDS;
         this._zonesFetchedAt = Date.now();
         if (this._retryTimer) clearTimeout(this._retryTimer);
         this._retryTimer = null;

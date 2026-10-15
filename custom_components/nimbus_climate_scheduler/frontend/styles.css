@@ -1567,6 +1567,124 @@ input:focus-visible {
   overflow-wrap: anywhere;
 }
 
+.panel-tabs {
+  display: flex;
+  gap: 8px;
+  margin: 0 0 18px;
+  border-bottom: 1px solid var(--line);
+}
+
+.panel-tabs button {
+  min-height: 42px;
+  padding: 8px 18px;
+  border: 0;
+  border-bottom: 3px solid transparent;
+  color: var(--muted);
+  background: transparent;
+  cursor: pointer;
+}
+
+.panel-tabs button[aria-selected="true"] {
+  color: var(--text);
+  border-bottom-color: var(--orange);
+}
+
+.settings {
+  max-width: 800px;
+  margin: 0 auto;
+  padding: 20px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.settings h2 {
+  margin-top: 0;
+}
+
+.settings p {
+  color: var(--muted);
+  font-size: 14px;
+  line-height: 1.6;
+}
+
+.settings-form {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(240px, 100%), 1fr));
+  gap: 20px;
+}
+
+.settings-form fieldset {
+  min-width: 0;
+  display: grid;
+  gap: 16px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 16px;
+}
+
+.settings-form legend {
+  padding: 0 6px;
+  font-weight: 700;
+}
+
+.settings-form label {
+  font-size: 13px;
+}
+
+.settings-form input {
+  display: block;
+  width: 100%;
+  min-height: 38px;
+  margin-top: 6px;
+  padding: 6px 10px;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 6px;
+  background: var(--surface-2);
+  color: var(--text);
+}
+
+.settings-actions {
+  grid-column: 1 / -1;
+  display: flex;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.settings-actions button,
+.apply-result button {
+  min-height: 38px;
+  padding: 6px 12px;
+  border: 1px solid var(--orange-soft);
+  border-radius: 6px;
+  background: var(--surface-2);
+  color: var(--text);
+  cursor: pointer;
+}
+
+.color-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 18px;
+  padding: 6px 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.color-swatch {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  margin-right: 6px;
+  border-radius: 50%;
+}
+
+.color-cold { background: var(--blue); }
+.color-comfort { background: var(--green); }
+.color-warm { background: var(--lime); }
+.color-hot { background: var(--yellow); }
+
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after {
     animation: none !important;

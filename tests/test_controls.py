@@ -6,8 +6,10 @@ from copy import deepcopy
 from unittest.mock import AsyncMock, patch
 
 import pytest
+import voluptuous as vol
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import entity_registry as er
+from homeassistant.util.unit_system import US_CUSTOMARY_SYSTEM
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.nimbus_climate_scheduler.const import DOMAIN
@@ -198,4 +200,46 @@ async def test_readonly_client_cannot_change_schedules(hass, backend, hass_ws_cl
     assert (await client.receive_json())["success"]
     await client.send_json({"id": 2, "type": f"{DOMAIN}/set_control", "entity_id": "climate.left", "enabled": False})
     assert not (await client.receive_json())["success"]
+    await client.send_json({"id": 3, "type": f"{DOMAIN}/set_settings", "settings": {"color_thresholds": {"heat": {"cold": 17}}}})
+    assert not (await client.receive_json())["success"]
     assert store.as_dict() == before
+
+
+async def test_color_settings_validation_persistence_and_conflicts(hass, backend):
+    store, _, original = backend
+    assert store.get_settings()["color_thresholds"]["heat"] == {"cold": 18, "warm": 20.5, "hot": 22}
+    await store.async_set_settings({"color_thresholds": {"heat": {"cold": 12, "warm": 14, "hot": 16}}}, 0)
+    valid = store.as_dict()
+    for value in (float("nan"), float("inf"), True, 17, 14):
+        with pytest.raises(vol.Invalid):
+            await store.async_set_settings({"color_thresholds": {"heat": {"cold": value}}})
+        assert store.as_dict() == valid
+    with pytest.raises(HomeAssistantError, match="changed elsewhere"):
+        await store.async_set_settings({"color_thresholds": {"heat": {"cold": 10}}}, 0)
+    reloaded = NimbusClimateSchedulerStore(hass)
+    await reloaded.async_load()
+    assert reloaded.get_settings() == store.get_settings()
+    assert reloaded.as_dict()["zones"] == original["zones"]
+
+
+async def test_number_automation_converts_fahrenheit_to_celsius(hass, backend):
+    store, _, _ = backend
+    hass.config.units = US_CUSTOMARY_SYSTEM
+    hass.config.components.update({"frontend", "http", "lovelace", "panel_custom", "websocket_api"})
+    entry = MockConfigEntry(domain=DOMAIN)
+    entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+    number_id = er.async_get(hass).async_get_entity_id("number", DOMAIN, f"{DOMAIN}_heat_cold_color_threshold")
+    state = hass.states.get(number_id)
+    assert state.attributes["unit_of_measurement"] == "°F"
+    assert float(state.state) == pytest.approx(64.4)
+    await hass.services.async_call("number", "set_value", {"entity_id": number_id, "value": 59}, blocking=True)
+    await hass.async_block_till_done()
+    assert store.get_settings()["color_thresholds"]["heat"]["cold"] == pytest.approx(15)
+    assert float(hass.states.get(number_id).state) == pytest.approx(59)
+    with pytest.raises(HomeAssistantError, match="ordered"):
+        await hass.services.async_call("number", "set_value", {"entity_id": number_id, "value": 80}, blocking=True)
+    assert store.get_settings()["color_thresholds"]["heat"]["cold"] == pytest.approx(15)
+    with patch("homeassistant.components.frontend.async_remove_panel"):
+        assert await hass.config_entries.async_unload(entry.entry_id)

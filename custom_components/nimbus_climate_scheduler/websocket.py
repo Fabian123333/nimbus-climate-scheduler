@@ -14,6 +14,7 @@ from homeassistant.helpers.dispatcher import async_dispatcher_connect
 
 from .const import DOMAIN, SIGNAL_UPDATED
 from .scheduler import DAYS, DAY_LENGTH_MINUTES, NimbusClimateScheduler
+from .settings import SETTINGS_SCHEMA
 
 
 def _finite_temperature(value):
@@ -167,6 +168,24 @@ def async_setup_websocket_api(hass: HomeAssistant) -> None:
         connection.send_result(msg["id"])
 
     @websocket_api.websocket_command({
+        vol.Required("type"): f"{DOMAIN}/set_settings",
+        vol.Required("settings"): SETTINGS_SCHEMA,
+        vol.Optional("expected_revision"): vol.All(int, vol.Range(min=0)),
+    })
+    @websocket_api.require_admin
+    @websocket_api.async_response
+    async def websocket_set_settings(hass, connection, msg) -> None:
+        store = hass.data[DOMAIN]["store"]
+        try:
+            await store.async_set_settings(msg["settings"], msg.get("expected_revision"))
+        except (vol.Invalid, HomeAssistantError) as err:
+            connection.send_error(msg["id"], "invalid_settings", str(err))
+            return
+        connection.send_result(msg["id"], {
+            "settings": store.get_settings(), "revision": store.data["settings_revision"],
+        })
+
+    @websocket_api.websocket_command({
         vol.Required("type"): f"{DOMAIN}/apply_now",
     })
     @websocket_api.require_admin
@@ -185,3 +204,4 @@ def async_setup_websocket_api(hass: HomeAssistant) -> None:
     websocket_api.async_register_command(hass, websocket_apply_now)
     websocket_api.async_register_command(hass, websocket_set_control)
     websocket_api.async_register_command(hass, websocket_subscribe)
+    websocket_api.async_register_command(hass, websocket_set_settings)
