@@ -6,14 +6,15 @@ from pathlib import Path
 
 import voluptuous as vol
 
-from homeassistant.components import frontend, panel_custom
+from homeassistant.components import frontend as ha_frontend, panel_custom
+from homeassistant.config_entries import SOURCE_IMPORT
 from homeassistant.components.http import StaticPathConfig
 from homeassistant.components.lovelace.const import (
     CONF_RESOURCE_TYPE_WS,
     LOVELACE_DATA,
     MODE_STORAGE,
 )
-from homeassistant.const import CONF_ID, CONF_TYPE, CONF_URL, EVENT_HOMEASSISTANT_STOP
+from homeassistant.const import CONF_ID, CONF_TYPE, CONF_URL, EVENT_HOMEASSISTANT_STOP, Platform
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import config_validation as cv
 
@@ -40,6 +41,7 @@ from .store import NimbusClimateSchedulerStore
 from .websocket import async_setup_websocket_api
 
 _LOGGER = logging.getLogger(__name__)
+PLATFORMS = [Platform.SWITCH, Platform.SELECT]
 
 CLIMATE_SCHEMA = vol.Schema({
     vol.Required(CONF_ENTITY): cv.entity_id,
@@ -64,6 +66,10 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
     hass.data.setdefault(DOMAIN, {})
     if DOMAIN in config:
         await _async_setup_scheduler(hass, config.get(DOMAIN) or {}, config, source="yaml")
+        # Give YAML installations a config entry for entity/device registration.
+        hass.async_create_task(hass.config_entries.flow.async_init(
+            DOMAIN, context={"source": SOURCE_IMPORT}, data=config.get(DOMAIN) or {},
+        ))
     return True
 
 
@@ -71,16 +77,19 @@ async def async_setup_entry(hass: HomeAssistant, entry) -> bool:
     """Set up from a config entry (UI)."""
     data = hass.data.setdefault(DOMAIN, {})
     if "scheduler" not in data:
-        await _async_setup_scheduler(hass, {}, {}, source="config_entry")
+        await _async_setup_scheduler(hass, dict(entry.data), {}, source="config_entry")
+    await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     return True
 
 
 async def async_unload_entry(hass: HomeAssistant, entry) -> bool:
     """Unload the config entry."""
     data = hass.data.get(DOMAIN) or {}
-    if data.get("source") == "config_entry" and "scheduler" in data:
-        data["scheduler"].stop()
-        frontend.async_remove_panel(hass, PANEL_URL)
+    if not await hass.config_entries.async_unload_platforms(entry, PLATFORMS):
+        return False
+    if "scheduler" in data:
+        await data["scheduler"].async_stop()
+        ha_frontend.async_remove_panel(hass, PANEL_URL)
         hass.data[DOMAIN] = {}
     return True
 
@@ -95,7 +104,7 @@ async def _async_setup_scheduler(
     climates = _configured_climates(domain_config, full_config)
 
     store = NimbusClimateSchedulerStore(hass)
-    await store.async_load()
+    await store.async_load([{"entity": climate.entity, "name": climate.name} for climate in climates])
 
     scheduler = NimbusClimateScheduler(
         hass=hass,
@@ -158,8 +167,8 @@ async def _async_setup_scheduler(
     previous_card_url = hass.data.get(card_url_key)
     if previous_card_url != card_module_url:
         if isinstance(previous_card_url, str):
-            frontend.remove_extra_js_url(hass, previous_card_url)
-        frontend.add_extra_js_url(hass, card_module_url)
+            ha_frontend.remove_extra_js_url(hass, previous_card_url)
+        ha_frontend.add_extra_js_url(hass, card_module_url)
         hass.data[card_url_key] = card_module_url
 
     if _panel_custom_is_already_registered(full_config):
@@ -169,7 +178,7 @@ async def _async_setup_scheduler(
     # reload); drop it first so re-registration can't raise "Overwriting panel".
     # On a cold boot the panel isn't registered yet, so silence the spurious
     # "Removing unknown panel" warning that HA would otherwise log.
-    frontend.async_remove_panel(hass, PANEL_URL, warn_if_unknown=False)
+    ha_frontend.async_remove_panel(hass, PANEL_URL, warn_if_unknown=False)
 
     await panel_custom.async_register_panel(
         hass,

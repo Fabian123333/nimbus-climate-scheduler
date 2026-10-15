@@ -108,7 +108,9 @@ That's it — no YAML required.
 
 - The panel saves each zone's schedule to Home Assistant storage over the
   websocket API. Drafts you're still editing are never applied — only what you
-  **save**.
+  **save**. New drafts are cached in the editing browser until saved. A failed
+  save leaves the draft editable; a conflicting edit from another client must
+  be reloaded rather than silently overwritten.
 - The backend loop resolves the active setpoint for the current time (schedule
   days run 05:00 → 05:00) and only calls a service when the thermostat differs
   from the target, so it won't spam your devices.
@@ -117,6 +119,41 @@ That's it — no YAML required.
 - New schedules start with one all-day interval. Existing schedules, including
   separate weekday plans and unsaved drafts, are preserved. Grouping is only an
   editing view; saving selected days leaves the other days unchanged.
+
+## Automations
+
+Each zone has a **Schedule** switch and a **Schedule mode** select, under
+Settings → Devices & Services → Nimbus Climate Scheduler. A grouped zone has
+one pair of controls for all its thermostats. Entity IDs are assigned by Home
+Assistant; use the entity picker to find yours.
+
+- `switch.turn_off` pauses scheduling. It does **not** turn thermostats off or
+  change their targets. Once the action returns, any in-flight scheduler work
+  has finished, so a following automation action can safely take control.
+- `switch.turn_on` resumes the last selected mode and applies the **saved** plan.
+- `select.select_option` with `heat` or `cool` changes the schedule mode. While
+  paused, it selects the mode to use on resume and leaves thermostats alone.
+- Editing the Heat/Cool tabs only selects the plan being edited. The separate
+  **Run schedule** selector and switch control what actually runs.
+
+For example, before a grid peak event (replace the example entity IDs):
+
+```yaml
+actions:
+  - action: switch.turn_off
+    target:
+      entity_id: switch.living_room_schedule
+  - action: climate.set_temperature
+    target:
+      entity_id: climate.living_room
+    data:
+      temperature: 18
+```
+
+When the event ends, call `switch.turn_on` on the same schedule switch. The
+panel and dashboard card receive updates when automations change these controls.
+Controls and schedules survive restarts; renaming a zone or changing its member
+order preserves the zone's entity identity.
 
 ## Notes
 

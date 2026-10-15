@@ -104,6 +104,8 @@ class NimbusClimateSchedulerPanel extends HTMLElement {
     this._hass = hass;
     this.temperatureUnit = hass?.config?.unit_system?.temperature ?? "°C";
     this.updateMenuButton();
+    this.ensureBackendSync();
+    this.ensureBackendSubscription();
     // hass updates arrive for every entity in the house; only re-render
     // when something the panel actually shows has changed.
     if (this.syncZonesFromHass()) {
@@ -152,6 +154,7 @@ class NimbusClimateSchedulerPanel extends HTMLElement {
     this.setupConnectionEvents();
     this.syncZonesFromHass();
     this.ensureBackendSync();
+    this.ensureBackendSubscription();
     this.startScheduler();
     this.render();
   }
@@ -162,6 +165,9 @@ class NimbusClimateSchedulerPanel extends HTMLElement {
     window.removeEventListener("pointercancel", this.stopDrag);
     this.narrowMedia?.removeEventListener("change", this.onNarrowMediaChange);
     window.clearTimeout(this._backendRetryTimer);
+    this._backendUnsubscribe?.();
+    this._backendUnsubscribe = null;
+    this.backendSyncStarted = false;
     this.stopScheduler();
     this.hideBubble();
   }
@@ -234,21 +240,26 @@ class NimbusClimateSchedulerPanel extends HTMLElement {
 
   syncZonesFromHass() {
     const climateConfigs = this.getConfiguredClimates();
-    if (!climateConfigs.length || !this._hass?.states) return false;
+    if (!this._hass?.states) return false;
+    if (!climateConfigs.length) {
+      const changed = this.zones.length > 0;
+      this.zones = [];
+      return changed;
+    }
 
     // Entities sharing a zone name form one zone with a shared schedule.
     const groups = new Map();
     for (const config of climateConfigs) {
       const state = this._hass.states[config.entity];
       if (!state) continue;
-      const zoneName = config.name ?? state.attributes.friendly_name ?? config.entity;
-      if (!groups.has(zoneName)) groups.set(zoneName, []);
-      groups.get(zoneName).push(config);
+      const groupKey = config.zone_id ?? config.name ?? config.entity;
+      if (!groups.has(groupKey)) groups.set(groupKey, []);
+      groups.get(groupKey).push(config);
     }
 
     const nextZones = [...groups.entries()]
-      .map(([zoneName, configs]) => this.makeZoneFromClimate(configs[0], {
-        name: zoneName,
+      .map(([, configs]) => this.makeZoneFromClimate(configs[0], {
+        name: configs[0].name ?? this._hass.states[configs[0].entity]?.attributes.friendly_name ?? configs[0].entity,
         entityIds: configs.map((config) => config.entity),
       }))
       .filter(Boolean);
@@ -282,11 +293,32 @@ class NimbusClimateSchedulerPanel extends HTMLElement {
     this.syncBackendSchedules();
   }
 
+  async ensureBackendSubscription() {
+    if (!this.isConnected || !this._hass?.connection?.subscribeMessage || this._backendUnsubscribe || this._subscribing) return;
+    this._subscribing = true;
+    try {
+      const unsubscribe = await this._hass.connection.subscribeMessage(
+        () => this.syncBackendSchedules(), { type: "nimbus_climate_scheduler/subscribe" },
+      );
+      if (this.isConnected) this._backendUnsubscribe = unsubscribe;
+      else unsubscribe();
+    } catch {
+      // Older backends do not expose subscriptions. The next HA update retries.
+    } finally {
+      this._subscribing = false;
+    }
+  }
+
   async syncBackendSchedules() {
+    if (this.applying || this._syncing) {
+      this._syncQueued = true;
+      return;
+    }
+    this._syncing = true;
     try {
       const result = await this._hass.callWS({ type: "nimbus_climate_scheduler/get_zones" });
       const zones = result?.zones ?? {};
-      this.serverClimates = Array.isArray(result?.climates) && result.climates.length
+      this.serverClimates = Array.isArray(result?.climates)
         ? result.climates
         : null;
       let loaded = false;
@@ -298,18 +330,30 @@ class NimbusClimateSchedulerPanel extends HTMLElement {
         if (!modes) continue;
 
         const entry = this.getOrCreateStoreEntry(entityId);
-        entry.modes = modes;
-        entry.scheduleMode = this.normalizeScheduleMode(data.scheduleMode, supportedModes);
+        // Preserve local edits when a switch or automation updates controls.
+        // Saving a stale draft is rejected using its original revision.
+        const dirty = Object.values(entry.modes ?? {}).some((schedule) => schedule.dirty);
+        if (!dirty || entry.revision === undefined) {
+          const cached = restoreStoredModes(loadStoredEntitySchedule(entityId)?.modes);
+          for (const [mode, schedule] of Object.entries(modes)) {
+            if (cached?.[mode]?.dirty && weeksEqual(cached[mode].savedWeek, schedule.savedWeek)) {
+              modes[mode] = cached[mode];
+            }
+          }
+          entry.modes = modes;
+          entry.revision = data.revision ?? 0;
+        }
+        entry.scheduleMode ??= this.normalizeScheduleMode(data.scheduleMode, supportedModes);
         entry.activeScheduleMode = this.normalizeActiveScheduleMode(data.activeScheduleMode, supportedModes);
+        entry.resumeScheduleMode = data.resumeScheduleMode ?? data.activeScheduleMode ?? data.scheduleMode;
         loaded = true;
       }
 
       this.backendSyncComplete = true;
-      this.stopScheduler();
 
       // First run: nothing stored and nothing configured — open the setup wizard.
       const yamlClimates = this._panel?.config?.climates ?? this._panel?.config?.zones ?? [];
-      if (!Object.keys(zones).length && !this.serverClimates && !yamlClimates.length) {
+      if (!Object.keys(zones).length && !this.serverClimates?.length && !yamlClimates.length) {
         this.showSetup = true;
         this.renderIfReady();
         return;
@@ -320,7 +364,11 @@ class NimbusClimateSchedulerPanel extends HTMLElement {
         this.syncZonesFromHass();
         this.renderIfReady();
       }
-      await this.pushAllSchedulesToBackend();
+      // Only initialize new zones. Opening a panel must never write cached
+      // controls or schedules over changes made by an automation.
+      for (const zone of this.zones) {
+        if (!zones[zone.entityId]) await this.saveZoneToBackend(zone);
+      }
     } catch {
       this.backendSyncComplete = false;
       // Don't get stuck in the frontend fallback forever — allow a retry so the
@@ -330,6 +378,12 @@ class NimbusClimateSchedulerPanel extends HTMLElement {
       this._backendRetryTimer = window.setTimeout(() => {
         if (this.isConnected) this.ensureBackendSync();
       }, 5000);
+    } finally {
+      this._syncing = false;
+      if (this._syncQueued && !this.applying) {
+        this._syncQueued = false;
+        this.syncBackendSchedules();
+      }
     }
   }
 
@@ -398,16 +452,18 @@ class NimbusClimateSchedulerPanel extends HTMLElement {
 
     if (this._hass?.callWS) {
       try {
-        await this._hass.callWS({
+        const result = await this._hass.callWS({
           type: "nimbus_climate_scheduler/set_climates",
           climates,
         });
+        this.serverClimates = result.climates;
       } catch {
-        // Backend unavailable; keep the selection client-side anyway.
+        this.showError("Could not save the zone selection.");
+        return;
       }
     }
 
-    this.serverClimates = climates;
+    this.serverClimates ??= climates;
     this.showSetup = false;
     this.setupDraft = null;
     this.zonesSignature = null;
@@ -495,23 +551,24 @@ class NimbusClimateSchedulerPanel extends HTMLElement {
     this.setupWizard.append(title, hint, list, actions);
   }
 
-  async saveZoneToBackend(zone) {
+  async saveZoneToBackend(zone, data = serializeZoneSchedule(zone)) {
     if (!zone.entityId || !this._hass?.callWS) return;
-    // Every entity in the zone carries the shared schedule, so the backend
-    // scheduler drives each thermostat in the group.
-    const data = serializeZoneSchedule(zone);
-    await Promise.all((zone.entityIds ?? [zone.entityId]).map((entityId) =>
-      this._hass.callWS({
-        type: "nimbus_climate_scheduler/save_zone",
-        entity_id: entityId,
-        data,
-      })));
+    const entry = this.getOrCreateStoreEntry(zone.id);
+    const result = await this._hass.callWS({
+      type: "nimbus_climate_scheduler/save_zone",
+      entity_id: zone.entityId,
+      data,
+      ...(entry.revision !== undefined ? { expected_revision: entry.revision } : {}),
+    });
+    entry.revision = result?.revision ?? entry.revision;
   }
 
   getConfiguredClimates() {
     const config = this._panel?.config ?? {};
     // The user's in-panel selection (setup wizard) wins over YAML config.
     const entries = this.serverClimates ?? config.climates ?? config.zones ?? [];
+
+    if (this.serverClimates?.length === 0) return [];
 
     if (!Array.isArray(entries) || !entries.length) {
       if (!this._hass?.states) return [];
@@ -634,7 +691,7 @@ class NimbusClimateSchedulerPanel extends HTMLElement {
             ? entry.activeScheduleMode
             : Object.prototype.hasOwnProperty.call(stored ?? {}, "activeScheduleMode")
               ? stored.activeScheduleMode
-              : state.state,
+               : null,
           supportedModes,
         )
       : null;
@@ -775,7 +832,7 @@ class NimbusClimateSchedulerPanel extends HTMLElement {
 
   render() {
     this.renderPending = false;
-    if (!this.zones.length) {
+    if (!this.zones.length && !this._hass) {
       this.zones = this.adoptZones(createDemoZones());
     }
 
@@ -1411,7 +1468,7 @@ class NimbusClimateSchedulerPanel extends HTMLElement {
     row.className = "zone-schedule-mode";
 
     const label = document.createElement("label");
-    label.textContent = "Schedule mode:";
+    label.textContent = "Edit schedule:";
 
     const pills = document.createElement("div");
     pills.className = "mode-pills";
@@ -1427,13 +1484,33 @@ class NimbusClimateSchedulerPanel extends HTMLElement {
       pill.setAttribute("aria-pressed", String(mode === zone.scheduleMode));
       pill.addEventListener("click", () => {
         if (mode === zone.scheduleMode) return;
-        this.setZoneScheduleMode(zone, mode);
-        this.render();
+        this.requestNavigation(() => {
+          this.daySelection = null;
+          this.selectedDay = null;
+          this.setZoneScheduleMode(zone, mode);
+        });
       });
       pills.append(pill);
     }
 
     row.append(label, pills);
+    const runLabel = document.createElement("label");
+    runLabel.textContent = "Run schedule: ";
+    const runMode = document.createElement("select");
+    runMode.setAttribute("aria-label", `${zone.name} active or resumed schedule mode`);
+    const entry = this.scheduleStore.get(zone.id);
+    const selected = zone.activeScheduleMode ?? entry?.resumeScheduleMode ?? zone.scheduleMode;
+    for (const mode of zone.supportedScheduleModes ?? ["heat", "cool"]) {
+      const option = document.createElement("option");
+      option.value = mode;
+      option.textContent = modeLabel(mode);
+      option.selected = mode === selected;
+      runMode.append(option);
+    }
+    runMode.disabled = this.applying || !this.backendSyncComplete;
+    runMode.addEventListener("change", () => this.setZoneControl(zone, { mode: runMode.value }));
+    runLabel.append(runMode);
+    row.append(runLabel);
     return row;
   }
 
@@ -1475,16 +1552,33 @@ class NimbusClimateSchedulerPanel extends HTMLElement {
       return;
     }
 
-    const { applied, skippedOff, skippedMode, failed } = this.applyResultData;
+    const { applied, failed } = this.applyResultData;
     const summary = document.createElement("span");
-    summary.textContent = `Applied ${applied.length} · Skipped ${skippedOff.length} off${skippedMode.length ? ` · Skipped ${skippedMode.length} mode` : ""} · Failed ${failed.length}`;
+    summary.textContent = failed.length ? "Could not complete the change." : `Saved. ${applied.length} thermostat(s) updated.`;
     this.applyResult.append(summary);
 
     if (failed.length) {
       const details = document.createElement("span");
       details.className = "apply-result-details";
-      details.textContent = failed.map((item) => item.entityId).join(", ");
+      details.textContent = failed.map((item) => `${item.entityId}: ${item.error ?? "Thermostat update failed"}`).join("; ");
       this.applyResult.append(details);
+    }
+
+    if (this.conflictZoneId) {
+      const reload = document.createElement("button");
+      reload.type = "button";
+      reload.textContent = "Discard draft and reload saved schedule";
+      reload.addEventListener("click", async () => {
+        const zone = this.findZone(this.conflictZoneId);
+        for (const entityId of zone?.entityIds ?? [this.conflictZoneId]) {
+          this.scheduleStore.delete(entityId);
+          try { localStorage.removeItem(storageKey(entityId)); } catch { /* Optional browser cache. */ }
+        }
+        this.conflictZoneId = null;
+        this.applyResultData = null;
+        await this.syncBackendSchedules();
+      });
+      this.applyResult.append(reload);
     }
 
     this.applyResult.hidden = false;
@@ -1494,114 +1588,17 @@ class NimbusClimateSchedulerPanel extends HTMLElement {
     if (!this.schedulerStatus) return;
 
     if (this.backendSyncComplete) {
-      this.schedulerStatus.textContent = "Backend scheduler on";
+      this.schedulerStatus.textContent = "Connected";
       return;
     }
 
-    const lastRun = this.lastSchedulerRun
-      ? `Last run ${formatClockTime(this.lastSchedulerRun)}`
-      : "Waiting";
-    this.schedulerStatus.textContent = `${this.schedulerRunning ? "Fallback running" : "Frontend fallback"} · ${lastRun}`;
+    this.schedulerStatus.textContent = "Connecting to scheduler…";
   }
 
   async runSchedulerTick() {
-    if (this.backendSyncComplete || this.applying || this.schedulerRunning || !this._hass?.callService) return;
-
-    const plans = this.buildApplyPlans()
-      // Hands-off: the automatic tick must never turn a disabled zone off — that
-      // would override manual control. "off" plans stay only for explicit Apply.
-      .filter((plan) => plan.action !== "off")
-      .map((plan) => this.withNeedsApply(plan))
-      .filter((plan) => plan.needsApply);
-
-    this.schedulerRunning = true;
-    this.renderIfReady();
-
-    const result = await this.applyPlans(plans);
-
-    this.lastSchedulerRun = new Date();
-    this.schedulerRunning = false;
-    if (result.applied.length || result.failed.length) {
-      this.applyResultData = result;
-    }
-    this.renderIfReady();
-  }
-
-
-  async applyPlans(plans) {
-    const result = {
-      applied: [],
-      skippedOff: plans.filter((plan) => plan.action === "off" && !plan.canApply),
-      skippedMode: [],
-      failed: [],
-    };
-
-    if (!this._hass?.callService) {
-      result.failed.push(...plans.filter((plan) => plan.canApply).map((plan) => ({
-        ...plan,
-        error: "Home Assistant service API unavailable",
-      })));
-      return result;
-    }
-
-    for (const plan of plans) {
-      if (!plan.canApply) continue;
-
-      try {
-        await this.applyPlan(plan);
-        result.applied.push(plan);
-      } catch (error) {
-        result.failed.push({
-          ...plan,
-          error: error?.message ?? String(error),
-        });
-      }
-    }
-
-    return result;
-  }
-
-  withNeedsApply(plan) {
-    if (plan.action === "off") {
-      return {
-        ...plan,
-        needsApply: plan.canApply,
-      };
-    }
-
-    const targetMatches = Number(plan.currentTargetTemp) === Number(plan.targetTemp);
-    return {
-      ...plan,
-      needsApply: plan.hvacMode !== plan.mode || !targetMatches,
-    };
-  }
-
-  async applyPlan(plan) {
-    const entityIds = plan.entityIds ?? [plan.entityId];
-
-    if (plan.action === "off") {
-      await this._hass.callService("climate", "set_hvac_mode", {
-        entity_id: entityIds,
-        hvac_mode: "off",
-      });
-      return;
-    }
-
-    await this._hass.callService("climate", "set_hvac_mode", {
-      entity_id: entityIds,
-      hvac_mode: plan.mode,
-    });
-
-    if (plan.hvacMode !== plan.mode) {
-      // Let the device switch modes before sending the setpoint, otherwise
-      // it can land on the old mode and get dropped.
-      await new Promise((resolve) => setTimeout(resolve, 1000));
-    }
-
-    await this._hass.callService("climate", "set_temperature", {
-      entity_id: entityIds,
-      temperature: plan.targetTemp,
-    });
+    // The backend is the sole thermostat writer. A stale/disconnected browser
+    // must never compete with an automation that has paused a schedule.
+    if (this._hass?.callWS) await this.syncBackendSchedules();
   }
 
   setZoneScheduleMode(zone, mode) {
@@ -1612,55 +1609,45 @@ class NimbusClimateSchedulerPanel extends HTMLElement {
     this.persistZone(zone);
   }
 
-  setZoneActiveScheduleMode(zone, mode) {
-    const entry = this.scheduleStore.get(zone.id);
-    if (entry) {
-      entry.activeScheduleMode = this.normalizeActiveScheduleMode(mode, zone.supportedScheduleModes ?? ["heat", "cool"]);
+  showError(message, name = "Nimbus") {
+    this.applyResultData = { applied: [], failed: [{ entityId: name, error: message }] };
+    this.renderIfReady();
+  }
+
+  async setZoneControl(zone, control) {
+    if (this.applying || !this.backendSyncComplete) return;
+    this.applying = true;
+    this.renderIfReady();
+    try {
+      await this._hass.callWS({ type: "nimbus_climate_scheduler/set_control", entity_id: zone.entityId, ...control });
+      this.applyResultData = null;
+    } catch (error) {
+      this.showError(error?.message ?? String(error), zone.name);
+    } finally {
+      this.applying = false;
+      await this.syncBackendSchedules();
+      this.renderIfReady();
     }
-    this.persistZone(zone);
   }
 
   renderZoneSwitch(zone) {
-    const active = zone.activeScheduleMode === zone.scheduleMode;
+    const active = Boolean(zone.activeScheduleMode);
     const compatible = zone.capabilitiesCompatible !== false;
     const button = document.createElement("button");
     button.type = "button";
     button.className = "zone-toggle";
     button.classList.toggle("active", active);
-    button.disabled = this.applying || !compatible;
+    button.disabled = this.applying || !this.backendSyncComplete || (!compatible && !active);
     button.setAttribute("aria-pressed", String(active));
-    button.setAttribute("aria-label", `${zone.name} ${modeLabel(zone.scheduleMode)} schedule ${active ? "on" : "off"}`);
+    button.setAttribute("aria-label", `${zone.name} schedule ${active ? "on" : "off"}`);
     button.title = !compatible
       ? (zone.capabilityIssues ?? ["Incompatible grouped thermostats"]).join(" · ")
       : active
-        ? `${modeLabel(zone.scheduleMode)} schedule active`
-        : `Enable ${modeLabel(zone.scheduleMode)} schedule`;
+        ? "Pause schedule and leave thermostats under manual control"
+        : "Resume the saved schedule";
     button.addEventListener("click", async (event) => {
       event.stopPropagation();
-      if (this.applying || !compatible) return;
-      const enabling = !active;
-      this.setZoneActiveScheduleMode(zone, enabling ? zone.scheduleMode : null);
-      if (enabling) {
-        this.selectedZoneId = zone.id;
-      }
-
-      // Enabling goes through the backend tick (single, ordered apply);
-      // turning off and the no-backend fallback keep the direct call.
-      if (enabling && this.backendSyncComplete && this._hass?.callWS) {
-        await this.saveAndApply(zone);
-        return;
-      }
-
-      const plan = buildZoneApplyPlan(zone, this.getActiveModeSchedule(zone)?.savedWeek);
-      this.applying = true;
-      this.applyResultData = null;
-      this.renderIfReady();
-
-      const result = await this.applyPlans(plan ? [plan] : []);
-
-      this.applying = false;
-      this.applyResultData = result;
-      this.renderIfReady();
+      await this.setZoneControl(zone, { enabled: !active });
     });
     return button;
   }
@@ -1729,14 +1716,14 @@ class NimbusClimateSchedulerPanel extends HTMLElement {
     this.guardBar.hidden = false;
   }
 
-  resolveGuard(action) {
+  async resolveGuard(action) {
     if (!this.pendingNavigation) return;
 
     const pending = this.pendingNavigation;
     const zone = this.findZone(pending.zoneId);
 
     if (action === "save" && zone) {
-      this.saveZoneMode(zone, pending.mode);
+      if (!await this.saveZoneMode(zone, pending.mode)) return;
     }
 
     if (action === "discard" && zone) {
@@ -1753,39 +1740,43 @@ class NimbusClimateSchedulerPanel extends HTMLElement {
   }
 
   saveZoneMode(zone, mode) {
-    const schedule = this.getModeSchedule(zone, mode);
-    schedule.savedWeek = cloneWeek(schedule.draftWeek);
-    schedule.dirty = false;
-    this.persistZone(zone);
-    this.saveAndApply(zone);
+    return this.saveZoneDays(zone, mode, DAYS);
   }
 
   saveZoneDay(zone, mode, day) {
-    this.saveZoneDays(zone, mode, [day]);
+    return this.saveZoneDays(zone, mode, [day]);
   }
 
   saveZoneDays(zone, mode, days) {
-    const schedule = this.getModeSchedule(zone, mode);
+    const data = serializeZoneSchedule(zone);
+    const schedule = data.modes[mode];
     for (const day of days) schedule.savedWeek[day] = cloneSetpoints(schedule.draftWeek[day]);
-    schedule.dirty = !weeksEqual(schedule.savedWeek, schedule.draftWeek);
-    this.persistZone(zone);
-    this.saveAndApply(zone);
+    return this.saveAndApply(zone, data);
   }
 
-  async saveAndApply(zone) {
+  async saveAndApply(zone, data) {
     // Saving pushes the schedule to the device right away through the
     // backend tick — no separate "Apply" step needed.
-    if (!this.backendSyncComplete || !this._hass?.callWS) return;
+    if (!this.backendSyncComplete || !this._hass?.callWS || this.applying) return false;
 
     this.applying = true;
     this.applyResultData = null;
     this.renderIfReady();
 
+    let saved = false;
     try {
       // The save must succeed before applying — otherwise the backend would
       // apply the PREVIOUS schedule. Let a failure bubble to the outer catch
       // (reported as failed) instead of swallowing it and applying stale data.
-      await this.saveZoneToBackend(zone);
+      data ??= serializeZoneSchedule(zone);
+      await this.saveZoneToBackend(zone, data);
+      for (const [mode, committed] of Object.entries(data.modes)) {
+        const schedule = this.getModeSchedule(zone, mode);
+        schedule.savedWeek = cloneWeek(committed.savedWeek);
+        schedule.dirty = !weeksEqual(schedule.savedWeek, schedule.draftWeek);
+      }
+      this.persistZone(zone);
+      saved = true;
       const result = await this._hass.callWS({ type: "nimbus_climate_scheduler/apply_now" });
       this.applyResultData = {
         applied: (result?.applied ?? []).map((entityId) => ({ entityId })),
@@ -1794,6 +1785,7 @@ class NimbusClimateSchedulerPanel extends HTMLElement {
         failed: (result?.failed ?? []).map((entityId) => ({ entityId })),
       };
     } catch (error) {
+      if (error?.code === "conflict") this.conflictZoneId = zone.id;
       this.applyResultData = {
         applied: [],
         skippedOff: [],
@@ -1803,7 +1795,12 @@ class NimbusClimateSchedulerPanel extends HTMLElement {
     }
 
     this.applying = false;
+    if (this._syncQueued) {
+      this._syncQueued = false;
+      await this.syncBackendSchedules();
+    }
     this.render();
+    return saved;
   }
 
   resetZoneDay(zone, mode, day) {
@@ -1827,7 +1824,6 @@ class NimbusClimateSchedulerPanel extends HTMLElement {
       activeScheduleMode: zone.activeScheduleMode,
       modes: zone.modes,
     });
-    this.saveZoneToBackend(zone).catch(() => undefined);
   }
 
   showBubble(event, scheduleMinute) {
@@ -2011,11 +2007,10 @@ function saveStoredEntitySchedule(entityId, data) {
 }
 
 function serializeZoneSchedule(zone) {
-  return serializeScheduleData({
+  return {
     scheduleMode: zone.scheduleMode,
-    activeScheduleMode: zone.activeScheduleMode,
-    modes: zone.modes,
-  });
+    modes: serializeModes(zone.modes),
+  };
 }
 
 function serializeScheduleData(data) {
@@ -2114,10 +2109,10 @@ function buildZoneApplyPlan(zone, week, at = new Date()) {
       action: "off",
       thermostatOn,
       modeMatches: !thermostatOn,
-      canApply: thermostatOn,
-      stateLabel: thermostatOn ? "will turn off" : "thermostat off",
-      applyLabel: thermostatOn ? "would turn off" : "skipped off",
-      previewText: "No active schedule",
+      canApply: false,
+      stateLabel: "Manual control",
+      applyLabel: "Paused",
+      previewText: "Schedule paused",
       targetTemp: null,
       nextTemp: null,
       nextTime: "-",
@@ -2161,7 +2156,8 @@ function getSchedulePointForTime(week, at = new Date()) {
   const scheduleMinute = clockMinuteToScheduleMinute((at.getHours() * 60) + at.getMinutes());
   const currentIndex = findActiveSetpointIndex(setpoints, scheduleMinute);
   const current = setpoints[currentIndex];
-  const next = setpoints[currentIndex + 1] ?? setpoints[0];
+  const nextDay = DAYS[(DAYS.indexOf(day) + 1) % DAYS.length];
+  const next = setpoints[currentIndex + 1] ?? week[nextDay]?.[0] ?? setpoints[0];
   const nextTime = minutesToTime(scheduleMinuteToClockMinute(next.minute));
 
   return {

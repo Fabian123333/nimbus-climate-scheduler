@@ -61,7 +61,7 @@ describe("Nimbus Climate Scheduler panel", () => {
     expect(schedule.draftWeek.Mon[0].minute).toBe(0);
   });
 
-  it("preserves distinct days and only saves the chosen days", () => {
+  it("preserves distinct days and only saves the chosen days", async () => {
     const { panel, zone, schedule } = editingPanel();
     schedule.savedWeek.Sun[0].temp = schedule.draftWeek.Sun[0].temp = 17;
     expect(panel.getDayGroups(zone)).toHaveLength(2);
@@ -70,11 +70,47 @@ describe("Nimbus Climate Scheduler panel", () => {
     expect(schedule.draftWeek.Wed[0].temp).toBe(22);
     expect(schedule.draftWeek.Tue[0].temp).toBe(20);
     expect(schedule.draftWeek.Sun[0].temp).toBe(17);
-    panel.saveAndApply = vi.fn();
-    panel.saveZoneDays(zone, "heat", ["Mon"]);
+    panel.backendSyncComplete = true;
+    panel._hass.callWS = vi.fn().mockResolvedValue({ revision: 1 });
+    await panel.saveZoneDays(zone, "heat", ["Mon"]);
     expect(schedule.savedWeek.Mon[0].temp).toBe(22);
     expect(schedule.savedWeek.Wed[0].temp).toBe(20);
     expect(schedule.dirty).toBe(true);
+    expect(panel._hass.callWS.mock.calls[0][0].data).not.toHaveProperty("activeScheduleMode");
+  });
+
+  it("keeps failed saves as editable drafts", async () => {
+    const { panel, zone, schedule } = editingPanel();
+    panel.backendSyncComplete = true;
+    panel._hass.callWS = vi.fn().mockRejectedValue({ code: "conflict", message: "Changed elsewhere" });
+    panel.updateDraftDay(zone, "Mon", (points) => { points[0].temp = 22; });
+
+    expect(await panel.saveZoneMode(zone, "heat")).toBe(false);
+    expect(schedule.savedWeek.Mon[0].temp).toBe(20);
+    expect(schedule.draftWeek.Mon[0].temp).toBe(22);
+    expect(schedule.dirty).toBe(true);
+    expect(panel.conflictZoneId).toBe(zone.id);
+    expect(panel._hass.callWS).toHaveBeenCalledTimes(1);
+  });
+
+  it("receives automation pauses without overwriting drafts or writing back", async () => {
+    const { panel, zone, schedule } = editingPanel();
+    const data = {
+      scheduleMode: "heat", activeScheduleMode: null, resumeScheduleMode: "heat", revision: 3,
+      modes: structuredClone(zone.modes),
+    };
+    panel.getOrCreateStoreEntry(zone.id).revision = 3;
+    panel.updateDraftDay(zone, "Mon", (points) => { points[0].temp = 22; });
+    panel._hass.callWS = vi.fn().mockResolvedValue({
+      climates: [{ entity: zone.entityId, name: "Room" }], zones: { [zone.entityId]: data },
+    });
+
+    await panel.syncBackendSchedules();
+
+    expect(panel.zones[0].activeScheduleMode).toBeNull();
+    expect(panel.zones[0].modes.heat.draftWeek.Mon[0].temp).toBe(22);
+    expect(schedule.savedWeek.Mon[0].temp).toBe(20);
+    expect(panel._hass.callWS).toHaveBeenCalledExactlyOnceWith({ type: "nimbus_climate_scheduler/get_zones" });
   });
 
   it("restores existing five-interval schedules and drafts without changing times", () => {

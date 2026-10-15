@@ -1,0 +1,22 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Nimbus Climate Scheduler",
+        "description": "Fügt die Zeitplanansicht zur Seitenleiste hinzu. Thermostate und Zonen richtest du anschließend dort ein."
+      }
+    },
+    "abort": {
+      "single_instance_allowed": "Nimbus Climate Scheduler ist bereits eingerichtet."
+    }
+  },
+  "entity": {
+    "switch": { "schedule": { "name": "Zeitplan" } },
+    "select": {
+      "schedule_mode": {
+        "name": "Zeitplanmodus",
+        "state": { "heat": "Heizen", "cool": "Kühlen" }
+      }
+    }
+  }
+}
