@@ -27,7 +27,7 @@ beforeEach(() => {
 
 afterEach(() => {
   document.body.replaceChildren();
-  localStorage.clear();
+  window.localStorage.clear();
   vi.useRealTimers();
 });
 
@@ -79,6 +79,18 @@ describe("Nimbus Climate Scheduler panel", () => {
     expect(panel._hass.callWS.mock.calls[0][0].data).not.toHaveProperty("activeScheduleMode");
   });
 
+  it("selects only weekend days even when the editor was opened on Monday", () => {
+    const { panel, zone, schedule } = editingPanel();
+    const selector = panel.renderDaySelection(zone, "Mon");
+    [...selector.querySelectorAll("button")].find((button) => button.textContent === "Weekend").click();
+    expect(panel.daySelection.days).toEqual(["Sat", "Sun"]);
+    expect(panel.selectedDay).toBe("Sat");
+    panel.updateDraftDay(zone, panel.selectedDay, (points) => { points[0].temp = 22; });
+    expect(schedule.draftWeek.Mon[0].temp).toBe(20);
+    expect(schedule.draftWeek.Sat[0].temp).toBe(22);
+    expect(schedule.draftWeek.Sun[0].temp).toBe(22);
+  });
+
   it("keeps failed saves as editable drafts", async () => {
     const { panel, zone, schedule } = editingPanel();
     panel.backendSyncComplete = true;
@@ -113,12 +125,27 @@ describe("Nimbus Climate Scheduler panel", () => {
     expect(panel._hass.callWS).toHaveBeenCalledExactlyOnceWith({ type: "nimbus_climate_scheduler/get_zones" });
   });
 
+  it("does not bring back an old server draft after it was discarded locally", async () => {
+    const { panel, zone } = editingPanel();
+    const data = { scheduleMode: "heat", activeScheduleMode: "heat", modes: structuredClone(zone.modes) };
+    data.modes.heat.draftWeek.Mon[0].temp = 23;
+    window.localStorage.setItem("nimbus-climate-scheduler:v1:climate.room", JSON.stringify({
+      scheduleMode: "heat", activeScheduleMode: "heat", modes: zone.modes,
+    }));
+    panel._hass.callWS = vi.fn().mockResolvedValue({
+      climates: [{ entity: zone.entityId, name: "Room" }], zones: { [zone.entityId]: data },
+    });
+    await panel.syncBackendSchedules();
+    expect(panel.zones[0].modes.heat.draftWeek.Mon[0].temp).toBe(20);
+    expect(panel.zones[0].modes.heat.dirty).toBe(false);
+  });
+
   it("restores existing five-interval schedules and drafts without changing times", () => {
     const points = [0, 120, 240, 555, 810].map((minute) => ({ minute, temp: 19.5 }));
     const week = Object.fromEntries(["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"].map((day) => [day, points]));
     const draft = structuredClone(week);
     draft.Tue[1].temp = 21;
-    localStorage.setItem("nimbus-climate-scheduler:v1:climate.room", JSON.stringify({
+    window.localStorage.setItem("nimbus-climate-scheduler:v1:climate.room", JSON.stringify({
       scheduleMode: "heat", activeScheduleMode: null,
       modes: { heat: { savedWeek: week, draftWeek: draft } },
     }));

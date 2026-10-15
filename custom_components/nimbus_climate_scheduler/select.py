@@ -22,9 +22,14 @@ class NimbusScheduleMode(NimbusZoneEntity, SelectEntity):
         return self.scheduler.supported_modes(self.zone_group) if self.zone_group else []
 
     @property
+    def available(self) -> bool:
+        return super().available and bool(self.options)
+
+    @property
     def current_option(self) -> str | None:
         modes = {zone.get("activeScheduleMode") or zone.get("resumeScheduleMode") or zone.get("scheduleMode", "heat") for zone in self.zones}
-        return next(iter(modes)) if len(modes) == 1 else None
+        mode = next(iter(modes)) if len(modes) == 1 else None
+        return mode if mode in self.options else None
 
     async def async_select_option(self, option: str) -> None:
         await self.scheduler.async_set_control(self.zone_id, mode=option)

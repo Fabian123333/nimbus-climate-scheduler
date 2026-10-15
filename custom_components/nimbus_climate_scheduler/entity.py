@@ -5,6 +5,7 @@ from homeassistant.core import callback
 from homeassistant.helpers import device_registry as dr, entity_registry as er
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.entity import DeviceInfo, Entity
+from homeassistant.helpers.event import async_track_state_change_event
 
 from .const import DOMAIN, SIGNAL_UPDATED
 
@@ -76,4 +77,30 @@ class NimbusZoneEntity(Entity):
         return {"climate_entities": (self.zone_group or {}).get("entity_ids", [])}
 
     async def async_added_to_hass(self) -> None:
-        self.async_on_remove(async_dispatcher_connect(self.hass, SIGNAL_UPDATED, self.async_write_ha_state))
+        self._remove_state_listener = None
+        self._tracked_entities = None
+        self.async_on_remove(async_dispatcher_connect(self.hass, SIGNAL_UPDATED, self._async_update))
+        self.async_on_remove(self._remove_climate_listener)
+        self._async_update()
+
+    @callback
+    def _remove_climate_listener(self):
+        if self._remove_state_listener:
+            self._remove_state_listener()
+            self._remove_state_listener = None
+
+    @callback
+    def _async_update(self):
+        entity_ids = tuple((self.zone_group or {}).get("entity_ids", []))
+        if entity_ids != self._tracked_entities:
+            self._remove_climate_listener()
+            self._tracked_entities = entity_ids
+            if entity_ids:
+                self._remove_state_listener = async_track_state_change_event(
+                    self.hass, entity_ids, self._async_climate_changed,
+                )
+        self.async_write_ha_state()
+
+    @callback
+    def _async_climate_changed(self, event):
+        self.async_write_ha_state()

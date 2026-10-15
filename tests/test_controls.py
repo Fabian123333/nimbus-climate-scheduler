@@ -135,6 +135,15 @@ async def test_unsupported_group_mode_is_rejected_atomically(hass, backend):
     assert store.as_dict() == before
 
 
+async def test_stale_browser_cannot_resurrect_a_deleted_zone(backend):
+    store, scheduler, _ = backend
+    draft = store.get_zone("climate.left")
+    await scheduler.async_set_climates([])
+    with pytest.raises(HomeAssistantError, match="Unknown Nimbus zone"):
+        await scheduler.async_set_zone("climate.left", draft, expected_revision=0)
+    assert store.zone_entity_ids() == []
+
+
 async def test_real_ha_switch_select_lifecycle(hass, backend):
     store, scheduler, _ = backend
     scheduler.async_tick = AsyncMock()
@@ -243,3 +252,27 @@ async def test_number_automation_converts_fahrenheit_to_celsius(hass, backend):
     assert store.get_settings()["color_thresholds"]["heat"]["cold"] == pytest.approx(15)
     with patch("homeassistant.components.frontend.async_remove_panel"):
         assert await hass.config_entries.async_unload(entry.entry_id)
+
+
+@pytest.mark.timeout(10)
+async def test_websocket_saves_validate_and_return_revisions(hass, backend, hass_ws_client):
+    store, _, _ = backend
+    client = await hass_ws_client(hass)
+    async_setup_websocket_api(hass)
+    data = {"modes": store.get_zone("climate.left")["modes"]}
+    data["modes"]["heat"]["savedWeek"]["Mon"][0]["temp"] = 21
+    command = {"type": f"{DOMAIN}/save_zone", "entity_id": "climate.left", "data": data, "expected_revision": 0}
+    await client.send_json({"id": 1, **command})
+    result = await client.receive_json()
+    assert result["success"]
+    assert result["result"]["revision"] == 1
+    await client.send_json({"id": 2, **command})
+    assert (await client.receive_json())["error"]["code"] == "conflict"
+
+    await client.send_json({"id": 3, "type": f"{DOMAIN}/set_settings", "settings": {"color_thresholds": {"heat": {"cold": 30}}}})
+    assert not (await client.receive_json())["success"]
+    await client.send_json({"id": 4, "type": f"{DOMAIN}/set_settings", "settings": {"color_thresholds": {"heat": {"cold": 17}}}, "expected_revision": 0})
+    result = await client.receive_json()
+    assert result["success"]
+    assert result["result"]["settings"]["color_thresholds"]["heat"]["cold"] == 17
+    assert result["result"]["revision"] == 1

@@ -6,7 +6,7 @@
   --line: #3a3327;
   --text: #ece7dc;
   --muted: #a7a096;
-  --faint: #706b63;
+  --faint: #a09a91;
   --orange: #ff8243;
   --orange-soft: #c57541;
   --blue: #52dce9;
@@ -924,10 +924,6 @@ select {
   box-shadow: 0 12px 36px rgba(0, 0, 0, 0.35);
 }
 
-.zone.expanded .zone-body {
-  animation: zone-body-in 220ms ease both;
-}
-
 @keyframes zone-body-in {
   from {
     opacity: 0;
@@ -1336,10 +1332,14 @@ select {
 }
 
 .day-chevron::before {
-  content: "❯";
+  content: "";
   display: block;
-  font-size: 14px;
-  font-weight: 900;
+  width: 8px;
+  height: 8px;
+  margin: auto;
+  border: solid currentColor;
+  border-width: 0 2px 2px 0;
+  transform: rotate(-45deg);
   transition: rotate 160ms ease;
 }
 
@@ -1406,46 +1406,6 @@ select {
   margin-left: auto;
 }
 
-/* === HC3-style column headers + zone status ============================= */
-
-.zone-column-headers {
-  display: flex;
-  align-items: center;
-  gap: 28px;
-  padding: 0 18px;
-  color: var(--faint);
-  font-size: 10px;
-  font-weight: 900;
-  letter-spacing: 0.14em;
-  text-transform: uppercase;
-}
-
-.zone-column-headers .zch-icon {
-  width: 15px;
-  overflow: hidden;
-  white-space: nowrap;
-}
-
-.zone-column-headers .zch-name {
-  width: 220px;
-}
-
-.zone-column-headers .zch-temp {
-  width: 120px;
-}
-
-.zone-column-headers .zch-mode {
-  flex: 1;
-}
-
-.zone-column-headers .zch-manage {
-  text-align: right;
-}
-
-:host([narrow]) .zone-column-headers {
-  display: none;
-}
-
 .zone-status {
   display: flex;
   align-items: center;
@@ -1470,6 +1430,17 @@ select {
 
 .zone-status[hidden] {
   display: none;
+}
+
+.zone-switch-slot {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.zone-schedule-state {
+  color: var(--muted);
+  font-size: 12px;
 }
 
 .week-toolbar,

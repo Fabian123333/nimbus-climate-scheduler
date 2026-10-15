@@ -371,7 +371,7 @@ class NimbusClimateSchedulerPanel extends HTMLElement {
         if (!dirty || entry.revision === undefined) {
           const cached = restoreStoredModes(loadStoredEntitySchedule(entityId)?.modes);
           for (const [mode, schedule] of Object.entries(modes)) {
-            if (cached?.[mode]?.dirty && weeksEqual(cached[mode].savedWeek, schedule.savedWeek)) {
+            if (cached?.[mode] && weeksEqual(cached[mode].savedWeek, schedule.savedWeek)) {
               modes[mode] = cached[mode];
             }
           }
@@ -505,7 +505,11 @@ class NimbusClimateSchedulerPanel extends HTMLElement {
     this.zonesSignature = null;
     this.syncZonesFromHass();
     this.render();
-    await this.pushAllSchedulesToBackend();
+    try {
+      await this.pushAllSchedulesToBackend();
+    } catch (error) {
+      this.showError(error?.message ?? "Could not initialize all zone schedules.");
+    }
   }
 
   renderSetup() {
@@ -621,27 +625,6 @@ class NimbusClimateSchedulerPanel extends HTMLElement {
         return null;
       })
       .filter((entry) => entry?.entity?.startsWith("climate."));
-  }
-
-  renderZoneColumnHeaders() {
-    const head = document.createElement("div");
-    head.className = "zone-column-headers";
-    head.setAttribute("aria-hidden", "true");
-
-    for (const [cls, text] of [
-      ["zch-icon", ""],
-      ["zch-name", "Zone"],
-      ["zch-temp", "Room temperature"],
-      ["zch-mode", "Thermostat mode"],
-      ["zch-manage", "Schedule"],
-    ]) {
-      const cell = document.createElement("span");
-      cell.className = cls;
-      cell.textContent = text;
-      head.append(cell);
-    }
-
-    return head;
   }
 
   renderZoneStatus(zone) {
@@ -893,14 +876,13 @@ class NimbusClimateSchedulerPanel extends HTMLElement {
     this.zonesEl.hidden = this.showSetup || this.activeTab !== "schedules";
     if (this.zonesEl.hidden) return;
 
-    this.zonesEl.append(this.renderZoneColumnHeaders());
-
     for (const zone of this.zones) {
       const schedule = this.getModeSchedule(zone);
       const node = this.zoneTemplate.content.firstElementChild.cloneNode(true);
       node.classList.toggle("expanded", zone.id === this.selectedZoneId);
       this.renderZoneName(node.querySelector(".zone-name"), zone);
       node.querySelector(".zone-temp").textContent = temperatureLabel(zone.currentTemp);
+      node.querySelector(".zone-temp").title = `Room temperature (${this.temperatureUnit})`;
       node.querySelector(".zone-mode").textContent = modeLabel(zone.hvacMode);
 
       if (schedule.dirty) {
@@ -909,6 +891,10 @@ class NimbusClimateSchedulerPanel extends HTMLElement {
 
       node.classList.toggle("inactive", !zone.activeScheduleMode);
       node.querySelector(".zone-switch-slot").append(this.renderZoneSwitch(zone));
+      const scheduleState = document.createElement("span");
+      scheduleState.className = "zone-schedule-state";
+      scheduleState.textContent = zone.activeScheduleMode ? "Scheduled" : "Paused";
+      node.querySelector(".zone-switch-slot").append(scheduleState);
       node.querySelector(".zone-header").append(this.renderZoneActions(zone));
       node.querySelector(".zone-name").setAttribute("aria-expanded", String(zone.id === this.selectedZoneId));
       node.querySelector(".zone-name").addEventListener("click", () => {
@@ -1392,10 +1378,10 @@ class NimbusClimateSchedulerPanel extends HTMLElement {
       const checkbox = document.createElement("input");
       checkbox.type = "checkbox";
       checkbox.checked = selection.days.includes(day);
-      checkbox.disabled = day === sourceDay;
+      checkbox.disabled = selection.days.length === 1 && selection.days.includes(day);
       checkbox.addEventListener("change", () => {
-        selection.days = DAYS.filter((target) => target === day ? checkbox.checked : selection.days.includes(target));
-        this.render();
+        this.selectEditingDays(zone, sourceDay,
+          DAYS.filter((target) => target === day ? checkbox.checked : selection.days.includes(target)));
       });
       label.append(checkbox, day);
       wrap.append(label);
@@ -1405,8 +1391,7 @@ class NimbusClimateSchedulerPanel extends HTMLElement {
       button.type = "button";
       button.textContent = label;
       button.addEventListener("click", () => {
-        selection.days = DAYS.filter((day) => day === sourceDay || days.includes(day));
-        this.render();
+        this.selectEditingDays(zone, sourceDay, days);
       });
       wrap.append(button);
     }
@@ -1414,6 +1399,15 @@ class NimbusClimateSchedulerPanel extends HTMLElement {
     hint.textContent = "Edits use this plan for all selected days. Save to apply them to your thermostats.";
     wrap.append(hint);
     return wrap;
+  }
+
+  selectEditingDays(zone, sourceDay, days) {
+    if (!days.length) return;
+    const source = days.includes(sourceDay) ? sourceDay : days[0];
+    this.selectedZoneId = zone.id;
+    this.selectedDay = source;
+    this.daySelection = { zoneId: zone.id, mode: zone.scheduleMode, sourceDay: source, days: [...days] };
+    this.render();
   }
 
   renderDayActions(zone, sourceDay) {
@@ -1595,12 +1589,14 @@ class NimbusClimateSchedulerPanel extends HTMLElement {
           climates: remaining,
         });
       } catch {
-        // Backend unavailable; apply the removal client-side anyway.
+        this.showError("Could not delete the zone. Please try again.", zone.name);
+        return;
       }
     }
 
     for (const entityId of zoneEntities) {
       this.scheduleStore.delete(entityId);
+      try { window.localStorage.removeItem(storageKey(entityId)); } catch { /* Optional browser cache. */ }
     }
     if (this.selectedZoneId === zone.id) {
       this.selectedZoneId = null;
@@ -1730,7 +1726,7 @@ class NimbusClimateSchedulerPanel extends HTMLElement {
         const zone = this.findZone(this.conflictZoneId);
         for (const entityId of zone?.entityIds ?? [this.conflictZoneId]) {
           this.scheduleStore.delete(entityId);
-          try { localStorage.removeItem(storageKey(entityId)); } catch { /* Optional browser cache. */ }
+          try { window.localStorage.removeItem(storageKey(entityId)); } catch { /* Optional browser cache. */ }
         }
         this.conflictZoneId = null;
         this.applyResultData = null;
@@ -2124,7 +2120,7 @@ function makeModeSchedule(baseDay) {
 
 function loadStoredEntitySchedule(entityId) {
   try {
-    const raw = localStorage.getItem(storageKey(entityId));
+    const raw = window.localStorage.getItem(storageKey(entityId));
     if (!raw) return null;
     const parsed = JSON.parse(raw);
     if (!parsed || typeof parsed !== "object") return null;
@@ -2136,7 +2132,7 @@ function loadStoredEntitySchedule(entityId) {
 
 function saveStoredEntitySchedule(entityId, data) {
   try {
-    localStorage.setItem(storageKey(entityId), JSON.stringify({
+    window.localStorage.setItem(storageKey(entityId), JSON.stringify({
       ...serializeScheduleData(data),
       updatedAt: new Date().toISOString(),
     }));

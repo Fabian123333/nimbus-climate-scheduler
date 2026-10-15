@@ -240,7 +240,9 @@ class NimbusClimateScheduler:
         """Persist a shared schedule without racing a scheduler tick."""
         async with self._lock:
             group = self.store.get_group(entity_id)
-            entity_ids = group["entity_ids"] if group else [entity_id]
+            if group is None:
+                raise HomeAssistantError("Unknown Nimbus zone. Reload the zone list before saving.")
+            entity_ids = group["entity_ids"]
             # The editor's revision belongs to its representative thermostat;
             # legacy group members may have different historical revisions.
             if expected_revision is not None:

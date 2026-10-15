@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import os
+from hashlib import sha256
 from pathlib import Path
 
 import voluptuous as vol
@@ -122,7 +123,7 @@ async def _async_setup_scheduler(
     hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STOP, lambda event: scheduler.stop())
 
     frontend_dir = Path(__file__).parent / "frontend"
-    card_module_url = CARD_MODULE_URL
+    panel_module_url, card_module_url = await hass.async_add_executor_job(_frontend_asset_urls, frontend_dir)
     try:
         await hass.async_add_executor_job(
             _sync_card_asset,
@@ -134,7 +135,7 @@ async def _async_setup_scheduler(
         # directory. This fallback can still race during startup, but the panel
         # and scheduler should never fail because an optional card copy did.
         _LOGGER.exception("Unable to publish the scheduler card under /local")
-        card_module_url = CARD_FALLBACK_MODULE_URL
+        card_module_url = f"{CARD_FALLBACK_MODULE_URL}?{card_module_url.split('?', 1)[1]}"
 
     # Register the static frontend path only once per HA run. It cannot be
     # unregistered, so a config-entry reload must not try to re-add it
@@ -186,7 +187,7 @@ async def _async_setup_scheduler(
         webcomponent_name=PANEL_COMPONENT_NAME,
         sidebar_title=PANEL_TITLE,
         sidebar_icon=PANEL_ICON,
-        module_url=PANEL_MODULE_URL,
+        module_url=panel_module_url,
         require_admin=True,
         config={
             "domain": DOMAIN,
@@ -196,6 +197,16 @@ async def _async_setup_scheduler(
             ],
         },
     )
+
+
+def _frontend_asset_urls(directory: Path) -> tuple[str, str]:
+    """Invalidate browser modules when their content changes, including dev builds."""
+    panel_version = sha256(
+        (directory / "nimbus-climate-scheduler-panel.js").read_bytes()
+        + (directory / "styles.css").read_bytes()
+    ).hexdigest()[:16]
+    card_version = sha256((directory / CARD_JS_FILENAME).read_bytes()).hexdigest()[:16]
+    return f"{PANEL_MODULE_URL}?v={panel_version}", f"{CARD_PUBLIC_PATH}?v={card_version}"
 
 
 def _sync_card_asset(source: Path, target: Path) -> bool:
